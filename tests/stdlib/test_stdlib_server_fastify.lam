@@ -1,0 +1,319 @@
+# Test: @lam/vulture — Fastify-style feature parity with requestId plugin.
+# expect: order: onRequest|preParsing|preValidation|preHandler|handler|preSerialization|onSend|onResponse
+# expect: handler-greeting: hello
+# expect: handler-reqdec: r1
+# expect: handler-resdec: rd1
+# expect: httperr-status: 409
+# expect: httperr-body: {"data":{"key":"x"},"error":"Conflict","message":"dup","statusCode":409}
+# expect: panicerr-status: 500
+# expect: panicerr-body: handled by central
+# expect: validate-body-status: 400
+# expect: validate-body-msg-has-validation: true
+# expect: validate-query-status: 400
+# expect: validate-query-msg-has-validation: true
+# expect: response-shaped-body: {"id":1,"name":"a"}
+# expect: encapsulated-shared-status: 200
+# expect: encapsulated-private-header: 1
+# expect: encapsulated-other-header:
+# expect: requestid-fresh-len: 20
+# expect: requestid-passthrough: existing-id
+# expect: openapi-paths-has-items: true
+# expect: openapi-has-getitems: true
+# expect: openapi-getitem-has-params: true
+# expect: wildcard-rest: a/b/c
+# expect: param-id: 7
+# expect: head-status: 200
+# expect: ready-fired: 1
+# expect: listen-fired: 1
+# expect: close-fired: 1
+
+from @lam/vulture import Server, Request, Response, HttpError
+from @lam/vulture/std-plugin import requestId
+from lamjson import Json
+
+go! {
+    import (
+        "fmt"
+        "strings"
+        "sync"
+    )
+
+    var orderEvents []string
+    var orderMu sync.Mutex
+
+    func recordOrder(name string) {
+        orderMu.Lock()
+        orderEvents = append(orderEvents, name)
+        orderMu.Unlock()
+    }
+}
+
+func onReqHook(req: Request, res: Response) {
+    go! {
+        recordOrder("onRequest")
+    }
+}
+func preParseHook(req: Request, res: Response) {
+    go! {
+        recordOrder("preParsing")
+    }
+}
+func preValHook(req: Request, res: Response) {
+    go! {
+        recordOrder("preValidation")
+    }
+}
+func preHandlerHook(req: Request, res: Response) {
+    go! {
+        recordOrder("preHandler")
+    }
+}
+func preSerHook(req: Request, res: Response) {
+    go! {
+        recordOrder("preSerialization")
+    }
+}
+func onSendHook(req: Request, res: Response) {
+    go! {
+        recordOrder("onSend")
+    }
+}
+func onRespHook(req: Request, res: Response) {
+    go! {
+        recordOrder("onResponse")
+    }
+}
+func orderRoute(req: Request, res: Response) {
+    go! {
+        recordOrder("handler")
+    }
+    res.text("ok")
+}
+
+func decoratorRoute(req: Request, res: Response) {
+    greeting: any = req.dec("greeting")
+    requestDecoration: any = req.dec("requestId")
+    responseDecoration: any = res.dec("respHelper")
+    res.json(Json.fromDict( {"greeting": greeting, "reqid": requestDecoration, "respdec": responseDecoration}))
+}
+func httpErrRoute(req: Request, res: Response) {
+    panic(HttpError(409, "dup", {"key": "x"}))
+}
+func panicRoute(req: Request, res: Response) {
+    panic("kaboom")
+}
+func centralErr(err: any, req: Request, res: Response) {
+    res.code(500).text("handled by central")
+}
+func itemsList(req: Request, res: Response) {
+    res.code(200).json( {"id": 1, "name": "a", "secret": "leak"})
+}
+func itemById(req: Request, res: Response) {
+    res.text("item:" + req.params[":id"])
+}
+func wildcardCatch(req: Request, res: Response) {
+    res.text(req.params["*"])
+}
+func headHandler(req: Request, res: Response) {
+    res.code(200).text("")
+}
+func encapPrivate(req: Request, res: Response) {
+    res.text("priv")
+}
+func encapShared(req: Request, res: Response) {
+    res.text("shared")
+}
+func encapPlugin(srv: Server) {
+    srv.onRequest(lamSetEncapHeader)
+    srv.get("/private", encapPrivate)
+}
+func lamSetEncapHeader(req: Request, res: Response) {
+    res.setHeader("X-Encap", "1")
+}
+func reqIdEcho(req: Request, res: Response) {
+    res.text(req.id())
+}
+
+func main() {
+    srv: Server = Server()
+    srv.onRequest(onReqHook)
+    srv.preParsing(preParseHook)
+    srv.preValidation(preValHook)
+    srv.preHandler(preHandlerHook)
+    srv.preSerialization(preSerHook)
+    srv.onSend(onSendHook)
+    srv.onResponse(onRespHook)
+    srv.get("/order", orderRoute)
+    srv.inject("GET", "/order")
+    order: str = ""
+    go! {
+        orderMu.Lock()
+        order = strings.Join(orderEvents, "|")
+        orderMu.Unlock()
+    }
+    print(f"order: {order}")
+
+    srv.decorate("greeting", "hello")
+    srv.decorateRequest("requestId", "r1")
+    srv.decorateResponse("respHelper", "rd1")
+    srv.get("/dec", decoratorRoute)
+    out: dict[str, any] = srv.inject("GET", "/dec")
+    body: any = out["body"]
+    bodystr: str = ""
+    go! {
+        if value, ok := body.(string); ok {
+            bodystr = value
+        }
+    }
+    go! {
+        if strings.Contains(bodystr, `"greeting":"hello"`) {
+            fmt.Println("handler-greeting: hello")
+        } else {
+            fmt.Println("handler-greeting: MISSING ->", bodystr)
+        }
+        if strings.Contains(bodystr, `"reqid":"r1"`) {
+            fmt.Println("handler-reqdec: r1")
+        } else {
+            fmt.Println("handler-reqdec: MISSING")
+        }
+        if strings.Contains(bodystr, `"respdec":"rd1"`) {
+            fmt.Println("handler-resdec: rd1")
+        } else {
+            fmt.Println("handler-resdec: MISSING")
+        }
+    }
+
+    srv.get("/oops", httpErrRoute)
+    errorResult: dict[str, any] = srv.inject("GET", "/oops")
+    print(f"httperr-status: {errorResult['status']}")
+    print(f"httperr-body: {errorResult['body']}")
+    srv.setErrorHandler(centralErr)
+    srv.get("/panic", panicRoute)
+    panicResult: dict[str, any] = srv.inject("GET", "/panic")
+    print(f"panicerr-status: {panicResult['status']}")
+    print(f"panicerr-body: {panicResult['body']}")
+
+    bodySchema: str = '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}'
+    srv.postOpts("/items", itemsList, {"schema": {"body": bodySchema}})
+    bodyValidation: dict[str, any] = srv.inject("POST", "/items", "{}", {"Content-Type": "application/json"})
+    bodyValidationBody: any = bodyValidation["body"]
+    bodyValidationText: str = ""
+    go! {
+        if value, ok := bodyValidationBody.(string); ok {
+            bodyValidationText = value
+        }
+    }
+    hasBodyValidation: bool = false
+    go! {
+        hasBodyValidation = strings.Contains(bodyValidationText, "validation")
+    }
+    print(f"validate-body-status: {bodyValidation['status']}")
+    print(f"validate-body-msg-has-validation: {hasBodyValidation}")
+
+    querySchema: str = '{"type":"object","required":["q"],"properties":{"q":{"type":"string"}}}'
+    srv.getOpts("/search", orderRoute, {"schema": {"querystring": querySchema}})
+    queryValidation: dict[str, any] = srv.inject("GET", "/search")
+    queryValidationBody: any = queryValidation["body"]
+    queryValidationText: str = ""
+    go! {
+        if value, ok := queryValidationBody.(string); ok {
+            queryValidationText = value
+        }
+    }
+    hasQueryValidation: bool = false
+    go! {
+        hasQueryValidation = strings.Contains(queryValidationText, "validation")
+    }
+    print(f"validate-query-status: {queryValidation['status']}")
+    print(f"validate-query-msg-has-validation: {hasQueryValidation}")
+
+    responseSchema: str = '{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"],"additionalProperties":false}'
+    srv.getOpts("/items/list", itemsList, {"schema": {"response": {"200": responseSchema}}})
+    responseResult: dict[str, any] = srv.inject("GET", "/items/list")
+    print(f"response-shaped-body: {responseResult['body']}")
+
+    srv.get("/shared", encapShared)
+    srv.register(encapPlugin, "", true)
+    privateResult: dict[str, any] = srv.inject("GET", "/private")
+    privateHeaders: any = privateResult["headers"]
+    privateHeader: str = ""
+    go! {
+        if headers, ok := privateHeaders.(map[string]string); ok {
+            privateHeader = headers["X-Encap"]
+        }
+    }
+    print(f"encapsulated-shared-status: {privateResult['status']}")
+    print(f"encapsulated-private-header: {privateHeader}")
+    sharedResult: dict[str, any] = srv.inject("GET", "/shared")
+    sharedHeaders: any = sharedResult["headers"]
+    sharedHeader: str = ""
+    go! {
+        if headers, ok := sharedHeaders.(map[string]string); ok {
+            sharedHeader = headers["X-Encap"]
+        }
+    }
+    print("encapsulated-other-header:" + sharedHeader)
+
+    srv2: Server = Server()
+    requestId(srv2)
+    srv2.get("/ridfresh", reqIdEcho)
+    fresh: dict[str, any] = srv2.inject("GET", "/ridfresh")
+    freshBody: any = fresh["body"]
+    freshText: str = ""
+    go! {
+        if value, ok := freshBody.(string); ok {
+            freshText = value
+        }
+    }
+    print(f"requestid-fresh-len: {len(freshText)}")
+    existingHeaders: dict[str, str] = {"X-Request-Id": "existing-id"}
+    existing: dict[str, any] = srv2.inject("GET", "/ridfresh", "", existingHeaders)
+    print(f"requestid-passthrough: {existing['body']}")
+
+    srv3: Server = Server()
+    srv3.getOpts("/items", itemsList, {"summary": "List items", "operationId": "listItems", "tags": ["items"], "schema": {"response": {"200": responseSchema}}})
+    srv3.getOpts("/items/:id", itemById, {"summary": "Get item", "operationId": "getItem"})
+    spec: str = srv3.openapi( {"title": "T", "version": "9.9"})
+    hasItems: bool = false
+    hasGetItems: bool = false
+    hasParams: bool = false
+    go! {
+        hasItems = strings.Contains(spec, `"/items"`)
+        hasGetItems = strings.Contains(spec, `"operationId": "listItems"`)
+        hasParams = strings.Contains(spec, `"name": "id"`)
+    }
+    print(f"openapi-paths-has-items: {hasItems}")
+    print(f"openapi-has-getitems: {hasGetItems}")
+    print(f"openapi-getitem-has-params: {hasParams}")
+
+    srv4: Server = Server()
+    srv4.get("/files/*", wildcardCatch)
+    srv4.get("/users/:id", itemById)
+    srv4.head("/h", headHandler)
+    wildcard: dict[str, any] = srv4.inject("GET", "/files/a/b/c")
+    print(f"wildcard-rest: {wildcard['body']}")
+    parameter: dict[str, any] = srv4.inject("GET", "/users/7")
+    parameterBody: any = parameter["body"]
+    go! {
+        if value, ok := parameterBody.(string); ok {
+            fmt.Printf("param-id: %s\n", strings.TrimPrefix(value, "item:"))
+        }
+    }
+    headResult: dict[str, any] = srv4.inject("HEAD", "/h")
+    print(f"head-status: {headResult['status']}")
+
+    srv5: Server = Server()
+    readyFired: int = 0
+    listenFired: int = 0
+    closeFired: int = 0
+    go! {
+        srv5.OnReadyHooks = append(srv5.OnReadyHooks, func(server *Server) { readyFired = 1 })
+        srv5.OnListenHooks = append(srv5.OnListenHooks, func(server *Server) { listenFired = 1 })
+        srv5.OnCloseHooks = append(srv5.OnCloseHooks, func(server *Server) { closeFired = 1 })
+    }
+    srv5.listenBackground(0)
+    srv5.close()
+    print(f"ready-fired: {readyFired}")
+    print(f"listen-fired: {listenFired}")
+    print(f"close-fired: {closeFired}")
+}

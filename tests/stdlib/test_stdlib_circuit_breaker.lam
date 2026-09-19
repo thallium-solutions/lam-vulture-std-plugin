@@ -1,0 +1,64 @@
+# Test: CircuitBreaker — closed -> open -> half-open -> closed cycle.
+# expect: state-initial: closed
+# expect: ok-call: ok
+# expect: state-after-success: closed
+# expect: state-after-trip: open
+# expect: open-blocks: blocked
+# expect: state-after-cooldown: half-open
+# expect: state-after-recovery: closed
+
+from @lam/vulture/std-plugin import CircuitBreaker
+from lamerrors import Result
+
+go! {
+    import (
+        "fmt"
+        "time"
+    )
+
+    var failNext bool
+
+    func goodFn() {}
+    func flakyFn() {
+        if failNext {
+            panic("downstream error")
+        }
+    }
+}
+
+func main() {
+    cb = CircuitBreaker(2, 100)
+    print(f"state-initial: {cb.state()}")
+    go! {
+        result := cb.CallFn(goodFn)
+        if result.Ok() {
+            fmt.Println("ok-call: ok")
+        } else {
+            fmt.Println("ok-call: FAIL")
+        }
+    }
+    print(f"state-after-success: {cb.state()}")
+    go! {
+        failNext = true
+        cb.CallFn(flakyFn)
+        cb.CallFn(flakyFn)
+    }
+    print(f"state-after-trip: {cb.state()}")
+    go! {
+        failNext = false
+        resultAfterTrip := cb.CallFn(flakyFn)
+        if !resultAfterTrip.Ok() {
+            fmt.Println("open-blocks: blocked")
+        } else {
+            fmt.Println("open-blocks: NOT BLOCKED")
+        }
+    }
+    go! {
+        time.Sleep(150 * time.Millisecond)
+    }
+    print(f"state-after-cooldown: {cb.state()}")
+    go! {
+        cb.CallFn(goodFn)
+    }
+    print(f"state-after-recovery: {cb.state()}")
+}

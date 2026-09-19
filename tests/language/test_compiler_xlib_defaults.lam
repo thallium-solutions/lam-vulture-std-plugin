@@ -1,0 +1,20 @@
+# Test: default arguments fill in for library-imported plugin functions.
+# expect: ok
+
+from @lam/vulture import Server
+from @lam/vulture/std-plugin import healthcheck, metrics, requestLog, rateLimit, compress, helmet, etag
+
+func main() {
+    srv: Server = Server()
+    helmet(srv)
+    etag(srv)
+    healthcheck(srv)
+    metrics(srv)
+    requestLog(srv)
+    rateLimit(srv)
+    compress(srv)
+    healthcheck(srv, "/live")
+    metrics(srv, "/scrape")
+    requestLog(srv, "[trace]")
+    print("ok")
+}

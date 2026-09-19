@@ -1,0 +1,132 @@
+# Test: compress handles stream files, raw streams, and SSE exclusions.
+# expect: stream-file-encoding: gzip
+# expect: stream-raw-encoding: gzip
+# expect: sse-encoding-absent: true
+# expect: no-gzip-header-absent: true
+
+from @lam/vulture import Server, Request, Response
+from @lam/vulture/std-plugin import compress
+
+go! {
+    import (
+        "fmt"
+        "net/http"
+        "os"
+        "path/filepath"
+        "strings"
+        "time"
+    )
+}
+
+func streamFileHandler(req: Request, res: Response) {
+    p: str = req.query["path"]
+    res.streamFile(p)
+}
+
+func rawStreamHandler(req: Request, res: Response) {
+    go! {
+        res.Headers["Content-Type"] = "text/plain; charset=utf-8"
+        res.StreamHandler = func(w http.ResponseWriter) {
+            for i := 0; i < 3; i++ {
+                fmt.Fprintf(w, "chunk %d\n", i)
+                if flusher, ok := w.(http.Flusher); ok {
+                    flusher.Flush()
+                }
+                time.Sleep(5 * time.Millisecond)
+            }
+        }
+        res.Sent = true
+    }
+}
+
+func sseHandler(req: Request, res: Response) {
+    go! {
+        res.SseHandler = func(emitter *SseEmitter) { emitter.Send("hi") }
+        res.Sent = true
+    }
+}
+
+func main() {
+    tmpDir: str = ""
+    tmpFile: str = ""
+    go! {
+        directory, _ := os.MkdirTemp("", "lamcmp")
+        tmpDir = directory
+        tmpFile = filepath.Join(directory, "big.txt")
+        _ = os.WriteFile(tmpFile, []byte(strings.Repeat("hello world\n", 512)), 0o644)
+    }
+
+    srv: Server = Server()
+    compress(srv, 16)
+    srv.get("/file", streamFileHandler)
+    srv.get("/raw", rawStreamHandler)
+    srv.get("/events", sseHandler)
+    srv.listenBackground(18899)
+
+    encFile: str = ""
+    go! {
+        encFile = func() string {
+            request, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:18899/file?path=%s", tmpFile), nil)
+            request.Header.Set("Accept-Encoding", "gzip")
+            client := &http.Client{Transport: &http.Transport{DisableCompression: true}, Timeout: 5 * time.Second}
+            response, err := client.Do(request)
+            if err != nil {
+                return ""
+            }
+            defer response.Body.Close()
+            return response.Header.Get("Content-Encoding")
+        }()
+    }
+    print(f"stream-file-encoding: {encFile}")
+
+    encRaw: str = ""
+    go! {
+        encRaw = func() string {
+            request, _ := http.NewRequest("GET", "http://127.0.0.1:18899/raw", nil)
+            request.Header.Set("Accept-Encoding", "gzip")
+            client := &http.Client{Transport: &http.Transport{DisableCompression: true}, Timeout: 5 * time.Second}
+            response, err := client.Do(request)
+            if err != nil {
+                return ""
+            }
+            defer response.Body.Close()
+            return response.Header.Get("Content-Encoding")
+        }()
+    }
+    print(f"stream-raw-encoding: {encRaw}")
+
+    encSse: str = ""
+    go! {
+        encSse = func() string {
+            request, _ := http.NewRequest("GET", "http://127.0.0.1:18899/events", nil)
+            request.Header.Set("Accept-Encoding", "gzip")
+            client := &http.Client{Transport: &http.Transport{DisableCompression: true}, Timeout: 2 * time.Second}
+            response, err := client.Do(request)
+            if err != nil {
+                return ""
+            }
+            defer response.Body.Close()
+            return response.Header.Get("Content-Encoding")
+        }()
+    }
+    print(f"sse-encoding-absent: {encSse != 'gzip'}")
+
+    encNo: str = ""
+    go! {
+        encNo = func() string {
+            request, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:18899/file?path=%s", tmpFile), nil)
+            request.Header.Set("Accept-Encoding", "identity")
+            client := &http.Client{Transport: &http.Transport{DisableCompression: true}, Timeout: 5 * time.Second}
+            response, err := client.Do(request)
+            if err != nil {
+                return ""
+            }
+            defer response.Body.Close()
+            return response.Header.Get("Content-Encoding")
+        }()
+    }
+    print(f"no-gzip-header-absent: {encNo != 'gzip'}")
+    go! {
+        os.RemoveAll(tmpDir)
+    }
+}

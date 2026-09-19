@@ -1,0 +1,19 @@
+[library]
+name = "@lam/vulture/std-plugin"
+version = "1.0.0"
+description = "Common server plugins and circuit-breaking utilities for @lam/vulture"
+license = "Apache-2.0"
+authors = ["Lammergeier contributors"]
+repository = "https://github.com/thallium-solutions/lam-vulture-std-plugin"
+homepage = "https://github.com/thallium-solutions/lam-vulture-std-plugin"
+
+[compatibility]
+lamc = "^1.17"
+
+[dependencies]
+"@lam/vulture" = { git = "https://github.com/thallium-solutions/lam-vulture.git", ref = "v1.0.0" }
+
+[scripts]
+test = "python3 tests/run_tests.py"
+format = "lamc fmt ."
+check = "lamc fmt . --check"

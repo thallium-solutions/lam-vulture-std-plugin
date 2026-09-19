@@ -1,0 +1,117 @@
+# Test: @lam/vulture/std-plugin (requestLog, rateLimit, compress).
+# expect: r1 status: 200
+# expect: r2 status: 200
+# expect: r3 status: 429
+# expect: r3 body: slow down
+# expect: r3 retry: 60
+# expect: r4 status: 200
+# expect: gz status: 200
+# expect: gz encoding: gzip
+# expect: gz vary: Accept-Encoding
+# expect: gz decoded len: 2048
+# expect: no gz encoding: ''
+
+from @lam/vulture import Server, Request, Response
+from @lam/vulture/std-plugin import requestLog, rateLimit, compress
+
+go! {
+    import (
+        "bytes"
+        "compress/gzip"
+        "io"
+        "strings"
+    )
+
+    func gunzip(s string) string {
+        r, err := gzip.NewReader(strings.NewReader(s))
+        if err != nil {
+            return "ERR-decode"
+        }
+        defer r.Close()
+        var b bytes.Buffer
+        if _, err := io.Copy(&b, r); err != nil {
+            return "ERR-copy"
+        }
+        return b.String()
+    }
+}
+
+func helloHandler(req: Request, res: Response) {
+    res.text("hello")
+}
+
+func bigHandler(req: Request, res: Response) {
+    big: str = ""
+    go! {
+        big = strings.Repeat("a", 2048)
+    }
+    res.text(big)
+}
+
+func main() {
+    srv: Server = Server()
+    requestLog(srv, "[test]")
+    rateLimit(srv, 2, 60000, "slow down")
+    compress(srv, 512)
+    srv.get("/hi", helloHandler)
+    srv.get("/big", bigHandler)
+
+    h: dict[str, str] = {"X-Forwarded-For": "1.2.3.4"}
+    r1: dict[str, any] = srv.inject("GET", "/hi", "", h)
+    print(f"r1 status: {r1['status']}")
+    r2: dict[str, any] = srv.inject("GET", "/hi", "", h)
+    print(f"r2 status: {r2['status']}")
+    r3: dict[str, any] = srv.inject("GET", "/hi", "", h)
+    r3headers: any = r3["headers"]
+    r3retry: str = ""
+    go! {
+        if hh, ok := r3headers.(map[string]string); ok {
+            r3retry = hh["Retry-After"]
+        }
+    }
+    print(f"r3 status: {r3['status']}")
+    print(f"r3 body: {r3['body']}")
+    print(f"r3 retry: {r3retry}")
+
+    h2: dict[str, str] = {"X-Forwarded-For": "5.6.7.8"}
+    r4: dict[str, any] = srv.inject("GET", "/hi", "", h2)
+    print(f"r4 status: {r4['status']}")
+
+    h3: dict[str, str] = {"X-Forwarded-For": "9.9.9.9", "Accept-Encoding": "gzip"}
+    rg: dict[str, any] = srv.inject("GET", "/big", "", h3)
+    rgb: any = rg["body"]
+    rgheaders: any = rg["headers"]
+    rgEnc: str = ""
+    rgVary: str = ""
+    go! {
+        if hh, ok := rgheaders.(map[string]string); ok {
+            rgEnc = hh["Content-Encoding"]
+            rgVary = hh["Vary"]
+        }
+    }
+    print(f"gz status: {rg['status']}")
+    print(f"gz encoding: {rgEnc}")
+    print(f"gz vary: {rgVary}")
+    rgBodyStr: str = ""
+    go! {
+        if body, ok := rgb.(string); ok {
+            rgBodyStr = body
+        }
+    }
+    decoded: str = ""
+    go! {
+        decoded = gunzip(rgBodyStr)
+    }
+    print(f"gz decoded len: {len(decoded)}")
+
+    h4: dict[str, str] = {"X-Forwarded-For": "9.9.9.10"}
+    rn: dict[str, any] = srv.inject("GET", "/big", "", h4)
+    rnheaders: any = rn["headers"]
+    rnEnc: str = ""
+    go! {
+        if hh, ok := rnheaders.(map[string]string); ok {
+            rnEnc = hh["Content-Encoding"]
+        }
+    }
+    print(f"no gz encoding: '{rnEnc}'")
+}

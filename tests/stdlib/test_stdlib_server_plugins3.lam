@@ -1,0 +1,94 @@
+# Test: @lam/vulture/std-plugin (serverTiming, idempotency).
+# expect: timing-has-total: true
+# expect: idem-first-status: 200
+# expect: idem-first-replay: none
+# expect: idem-second-status: 200
+# expect: idem-second-replay: 1
+# expect: idem-second-body: created-1
+# expect: idem-no-key-no-replay: none
+
+from @lam/vulture import Server, Request, Response
+from @lam/vulture/std-plugin import serverTiming, idempotency
+
+go! {
+    import (
+        "strings"
+        "sync/atomic"
+    )
+
+    var idemCounter int64
+}
+
+func slowHandler(req: Request, res: Response) {
+    res.text("ok")
+}
+func createHandler(req: Request, res: Response) {
+    number: int = 0
+    go! {
+        number = int(atomic.AddInt64(&idemCounter, 1))
+    }
+    res.code(200).text(f"created-{number}")
+}
+
+func main() {
+    srv: Server = Server()
+    serverTiming(srv)
+    srv.get("/slow", slowHandler)
+    timingResult: dict[str, any] = srv.inject("GET", "/slow")
+    timingHeaders: any = timingResult["headers"]
+    timing: str = ""
+    go! {
+        if headers, ok := timingHeaders.(map[string]string); ok {
+            timing = headers["Server-Timing"]
+        }
+    }
+    hasTotal: bool = false
+    go! {
+        hasTotal = strings.Contains(timing, "total;dur=")
+    }
+    print(f"timing-has-total: {hasTotal}")
+
+    srv2: Server = Server()
+    idempotency(srv2, "Idempotency-Key", 60)
+    srv2.post("/charge", createHandler)
+    headers: dict[str, str] = {"Idempotency-Key": "abc123", "Content-Type": "application/json"}
+    r1: dict[str, any] = srv2.inject("POST", "/charge", "{}", headers)
+    r1Headers: any = r1["headers"]
+    r1Replay: str = ""
+    go! {
+        if value, ok := r1Headers.(map[string]string); ok {
+            r1Replay = value["X-Idempotency-Replay"]
+        }
+    }
+    print(f"idem-first-status: {r1['status']}")
+    if r1Replay == "" {
+        r1Replay = "none"
+    }
+    print(f"idem-first-replay: {r1Replay}")
+
+    r2: dict[str, any] = srv2.inject("POST", "/charge", "{}", headers)
+    r2Headers: any = r2["headers"]
+    r2Replay: str = ""
+    go! {
+        if value, ok := r2Headers.(map[string]string); ok {
+            r2Replay = value["X-Idempotency-Replay"]
+        }
+    }
+    print(f"idem-second-status: {r2['status']}")
+    print(f"idem-second-replay: {r2Replay}")
+    print(f"idem-second-body: {r2['body']}")
+
+    plain: dict[str, str] = {"Content-Type": "application/json"}
+    r3: dict[str, any] = srv2.inject("POST", "/charge", "{}", plain)
+    r3Headers: any = r3["headers"]
+    r3Replay: str = ""
+    go! {
+        if value, ok := r3Headers.(map[string]string); ok {
+            r3Replay = value["X-Idempotency-Replay"]
+        }
+    }
+    if r3Replay == "" {
+        r3Replay = "none"
+    }
+    print(f"idem-no-key-no-replay: {r3Replay}")
+}
