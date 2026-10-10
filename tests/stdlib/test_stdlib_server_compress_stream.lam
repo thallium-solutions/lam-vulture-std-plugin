@@ -5,7 +5,7 @@
 # expect: no-gzip-header-absent: true
 
 from @lam/vulture import Server, Request, Response
-from @lam/vulture/std-plugin import compress
+from @lam/vulture/std-plugin import compressPlugin
 
 go! {
     import (
@@ -57,11 +57,11 @@ func main() {
     }
 
     srv: Server = Server()
-    compress(srv, 16)
+    srv.register(compressPlugin(16))
     srv.get("/file", streamFileHandler)
     srv.get("/raw", rawStreamHandler)
     srv.get("/events", sseHandler)
-    srv.listenBackground(18899)
+    _ = srv.listenBackground(18899).unwrap()
 
     encFile: str = ""
     go! {

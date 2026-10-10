@@ -1,0 +1,124 @@
+# Complex std-plugin composition over one ephemeral local server.
+# expect: unauth status: 401
+# expect: auth challenge: true
+# expect: auth cache policy: private, max-age=30
+# expect: auth status: 200
+# expect: auth user: hello alice
+# expect: trace format: true
+# expect: cache default: private, max-age=30
+# expect: inbound trace preserved: true
+# expect: inbound span replaced: true
+# expect: tracestate preserved: vendor=local
+# expect: handler cache wins: max-age=5
+# expect: circuit initial: closed
+# expect: circuit success: true
+# expect: circuit first failure: true
+# expect: circuit opens: open
+# expect: circuit blocks: true
+# expect: circuit half-open: half-open
+# expect: circuit recovers: closed
+
+from @lam/vulture import Server, Request, Response
+from @lam/vulture/std-plugin import basicAuthPlugin, cacheControlPlugin, tracingPlugin, CircuitBreaker
+from lamerrors import Result
+from lamhttp import HttpClient, HttpResponse
+from lamstrings import Strings
+from lamtime import Time
+
+
+go! {
+    import "strings"
+}
+
+func authenticated(req: Request, res: Response) {
+    user: str = ""
+    go! {
+        if value, ok := req.Ctx.Get("user", nil).(string); ok {
+            user = value
+        }
+    }
+    res.text("hello " + user)
+}
+
+func explicitlyCached(req: Request, res: Response) {
+    res.setHeader("Cache-Control", "max-age=5")
+    res.text("cached")
+}
+
+func succeeds() {
+    pass
+}
+
+func fails() {
+    go! {
+        panic("local downstream failed")
+    }
+}
+
+func traceParts(value: str) -> list[str] {
+    parts: list[str] = []
+    go! {
+        parts = strings.Split(value, "-")
+    }
+    return parts
+}
+
+func main() {
+    server: Server = Server()
+    users: dict[str, str] = {"alice": "secret"}
+    authFactory: func(Server) = basicAuthPlugin(users, "Local API")
+    traceFactory: func(Server) = tracingPlugin(true)
+    cacheFactory: func(Server) = cacheControlPlugin("private, max-age=30")
+    server.register(authFactory)
+    server.register(traceFactory)
+    server.register(cacheFactory)
+    server.get("/account", authenticated)
+    server.get("/cached", explicitlyCached)
+    _ = server.listenBackground(0).unwrap()
+
+    base: str = "http://" + server.boundAddr
+    anonymous: HttpClient = HttpClient(base, 1000)
+    denied: HttpResponse = anonymous.get("/account").unwrap()
+    print(f"unauth status: {denied.status}")
+    print("auth challenge: " + str(Strings.contains(denied.header("WWW-Authenticate"), "Local API")))
+    print("auth cache policy: " + denied.header("Cache-Control"))
+
+    client: HttpClient = HttpClient(base, 1000)
+    client.setHeader("Authorization", "Basic YWxpY2U6c2VjcmV0")
+    accepted: HttpResponse = client.get("/account").unwrap()
+    print(f"auth status: {accepted.status}")
+    print("auth user: " + accepted.body)
+    freshParent: str = accepted.header("traceparent")
+    freshParts: list[str] = traceParts(freshParent)
+    print("trace format: " + str(len(freshParts) == 4 and len(freshParts[1]) == 32 and len(freshParts[2]) == 16))
+    print("cache default: " + accepted.header("Cache-Control"))
+
+    traceId: str = "4bf92f3577b34da6a3ce929d0e0e4736"
+    oldSpan: str = "00f067aa0ba902b7"
+    inbound: HttpResponse = client.build("GET", "/account").header(
+    "traceparent", "00-" + traceId + "-" + oldSpan + "-01").header(
+    "tracestate", "vendor=local").send().unwrap()
+    inboundParts: list[str] = traceParts(inbound.header("traceparent"))
+    print("inbound trace preserved: " + str(inboundParts[1] == traceId))
+    print("inbound span replaced: " + str(inboundParts[2] != oldSpan and len(inboundParts[2]) == 16))
+    print("tracestate preserved: " + inbound.header("tracestate"))
+
+    cached: HttpResponse = client.get("/cached").unwrap()
+    print("handler cache wins: " + cached.header("Cache-Control"))
+    server.close()
+
+    breaker: CircuitBreaker = CircuitBreaker(2, 60)
+    print("circuit initial: " + breaker.state())
+    good: Result = breaker.call(succeeds)
+    print("circuit success: " + str(good.ok()))
+    firstFailure: Result = breaker.call(fails)
+    print("circuit first failure: " + str(not firstFailure.ok()))
+    _ = breaker.call(fails)
+    print("circuit opens: " + breaker.state())
+    blocked: Result = breaker.call(succeeds)
+    print("circuit blocks: " + str(not blocked.ok()))
+    Time.sleepMs(80)
+    print("circuit half-open: " + breaker.state())
+    _ = breaker.call(succeeds)
+    print("circuit recovers: " + breaker.state())
+}

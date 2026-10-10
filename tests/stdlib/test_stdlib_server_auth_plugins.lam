@@ -11,7 +11,7 @@
 # expect: cache-control-handler-wins: max-age=60
 
 from @lam/vulture import Server, Request, Response
-from @lam/vulture/std-plugin import basicAuth, bearerAuth, ipFilter, cacheControl
+from @lam/vulture/std-plugin import basicAuthPlugin, bearerAuthPlugin, ipFilterPlugin, cacheControlPlugin
 
 go! {
     import (
@@ -44,9 +44,7 @@ func bearerHandler(req: Request, res: Response) {
 }
 
 func cachedHandler(req: Request, res: Response) {
-    go! {
-        res.Headers["Cache-Control"] = "max-age=60"
-    }
+    res.headers["Cache-Control"] = "max-age=60"
     res.text("cached")
 }
 
@@ -69,26 +67,26 @@ func main() {
     allowList: list[str] = ["127.0.0.0/8", "::1/128"]
 
     basicSrv: Server = Server()
-    basicAuth(basicSrv, users)
+    basicSrv.register(basicAuthPlugin(users))
     basicSrv.get("/hello", hello)
-    basicSrv.listenBackground(0)
+    _ = basicSrv.listenBackground(0).unwrap()
 
     bearerSrv: Server = Server()
-    bearerAuth(bearerSrv, verifyBearer)
+    bearerSrv.register(bearerAuthPlugin(verifyBearer))
     bearerSrv.get("/me", bearerHandler)
-    bearerSrv.listenBackground(0)
+    _ = bearerSrv.listenBackground(0).unwrap()
 
     denyList: list[str] = []
     ipSrv: Server = Server()
-    ipFilter(ipSrv, allowList, denyList)
+    ipSrv.register(ipFilterPlugin(allowList, denyList))
     ipSrv.get("/", okHandler)
-    ipSrv.listenBackground(0)
+    _ = ipSrv.listenBackground(0).unwrap()
 
     cacheSrv: Server = Server()
-    cacheControl(cacheSrv, directive = "no-store")
+    cacheSrv.register(cacheControlPlugin(directive = "no-store"))
     cacheSrv.get("/", xHandler)
     cacheSrv.get("/cached", cachedHandler)
-    cacheSrv.listenBackground(0)
+    _ = cacheSrv.listenBackground(0).unwrap()
 
     go! {
         for i := 0; i < 100; i++ {

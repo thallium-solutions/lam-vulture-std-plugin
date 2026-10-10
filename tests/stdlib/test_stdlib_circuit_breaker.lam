@@ -9,56 +9,39 @@
 
 from @lam/vulture/std-plugin import CircuitBreaker
 from lamerrors import Result
+from lamtime import Time
 
-go! {
-    import (
-        "fmt"
-        "time"
-    )
+func goodFn() {
+    pass
+}
 
-    var failNext bool
-
-    func goodFn() {}
-    func flakyFn() {
-        if failNext {
-            panic("downstream error")
-        }
+func failingFn() {
+    go! {
+        panic("downstream error")
     }
 }
 
 func main() {
-    cb = CircuitBreaker(2, 100)
+    cb: CircuitBreaker = CircuitBreaker(2, 100)
     print(f"state-initial: {cb.state()}")
-    go! {
-        result := cb.CallFn(goodFn)
-        if result.Ok() {
-            fmt.Println("ok-call: ok")
-        } else {
-            fmt.Println("ok-call: FAIL")
-        }
+    success: Result = cb.call(goodFn)
+    if success.ok() {
+        print("ok-call: ok")
+    } else {
+        print("ok-call: FAIL")
     }
     print(f"state-after-success: {cb.state()}")
-    go! {
-        failNext = true
-        cb.CallFn(flakyFn)
-        cb.CallFn(flakyFn)
-    }
+    _ = cb.call(failingFn)
+    _ = cb.call(failingFn)
     print(f"state-after-trip: {cb.state()}")
-    go! {
-        failNext = false
-        resultAfterTrip := cb.CallFn(flakyFn)
-        if !resultAfterTrip.Ok() {
-            fmt.Println("open-blocks: blocked")
-        } else {
-            fmt.Println("open-blocks: NOT BLOCKED")
-        }
+    blocked: Result = cb.call(goodFn)
+    if not blocked.ok() {
+        print("open-blocks: blocked")
+    } else {
+        print("open-blocks: NOT BLOCKED")
     }
-    go! {
-        time.Sleep(150 * time.Millisecond)
-    }
+    Time.sleepMs(150)
     print(f"state-after-cooldown: {cb.state()}")
-    go! {
-        cb.CallFn(goodFn)
-    }
+    _ = cb.call(goodFn)
     print(f"state-after-recovery: {cb.state()}")
 }

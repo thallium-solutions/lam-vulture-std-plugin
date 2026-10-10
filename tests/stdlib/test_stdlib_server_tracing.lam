@@ -8,7 +8,7 @@
 # expect: state-propagated: vendor=abc
 # expect: echo-off-no-header: true
 
-from @lam/vulture import Server, Request, Response
+from @lam/vulture import Server, Request, Response, InjectResponse
 from @lam/vulture/std-plugin import tracing
 
 go! {
@@ -39,14 +39,8 @@ func main() {
     srv: Server = Server()
     tracing(srv)
     srv.get("/t", traceDump)
-    r1: dict[str, any] = srv.inject("GET", "/t")
-    h1: any = r1["headers"]
-    echoedTp: str = ""
-    go! {
-        if headers, ok := h1.(map[string]string); ok {
-            echoedTp = headers["traceparent"]
-        }
-    }
+    r1: InjectResponse = srv.inject("GET", "/t")
+    echoedTp: str = r1.header("traceparent")
     print(f"fresh-echo-has-tp: {echoedTp != ''}")
 
     formatOk: bool = false
@@ -68,17 +62,14 @@ func main() {
     inboundSid: str = "00f067aa0ba902b7"
     inboundTp: str = f"00-{inboundTid}-{inboundSid}-01"
     hdrs: dict[str, str] = {"traceparent": inboundTp, "tracestate": "vendor=abc"}
-    r2: dict[str, any] = srv.inject("GET", "/t", "", hdrs)
-    b2: any = r2["body"]
+    r2: InjectResponse = srv.inject("GET", "/t", "", hdrs)
     seenTid: str = ""
     seenSid: str = ""
     go! {
-        if body, ok := b2.(string); ok {
-            parts := strings.Split(body, "|")
-            if len(parts) == 3 {
-                seenTid = strings.Split(parts[0], "-")[1]
-                seenSid = parts[2]
-            }
+        inboundParts := strings.Split(r2.Body, "|")
+        if len(inboundParts) == 3 {
+            seenTid = strings.Split(inboundParts[0], "-")[1]
+            seenSid = inboundParts[2]
         }
     }
     print(f"inbound-same-trace: {seenTid == inboundTid}")
@@ -87,28 +78,11 @@ func main() {
         newSpan = true
     }
     print(f"inbound-new-span: {newSpan}")
-    h2: any = r2["headers"]
-    echoedState: str = ""
-    go! {
-        if headers, ok := h2.(map[string]string); ok {
-            echoedState = headers["tracestate"]
-        }
-    }
-    print(f"state-propagated: {echoedState}")
+    print(f"state-propagated: {r2.header('tracestate')}")
 
     srv2: Server = Server()
     tracing(srv2, false)
     srv2.get("/t", traceDump)
-    r3: dict[str, any] = srv2.inject("GET", "/t")
-    h3: any = r3["headers"]
-    missing: bool = false
-    go! {
-        if headers, ok := h3.(map[string]string); ok {
-            _, present := headers["traceparent"]
-            missing = !present
-        } else {
-            missing = true
-        }
-    }
-    print(f"echo-off-no-header: {missing}")
+    r3: InjectResponse = srv2.inject("GET", "/t")
+    print(f"echo-off-no-header: {r3.header('traceparent') == ''}")
 }

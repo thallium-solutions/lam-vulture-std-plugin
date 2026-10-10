@@ -10,27 +10,27 @@ and is the standalone continuation of Lammergeier's original
 
 ## Requirements
 
-- `lamc` 1.17.0 or a compatible later 1.x release (`^1.17`).
+- `lamc` 1.18.0 or a compatible later 1.x release (`^1.18`).
 - Go, used by `lamc` for compression, cryptography, networking, concurrency,
   timekeeping, and runtime callback bridges.
-- `@lam/vulture` v1.0.0. A Git dependency pinned to the v1.0.0 tag is declared
+- `@lam/vulture` v2.0.0. A Git dependency pinned to the v2.0.0 tag is declared
   in `lamlib.toml` and is installed transitively.
 
 ## Installation
 
 ### Registry
 
-Install the v1.0.0 registry release in a Lammergeier project:
+Install the v2.0.0 registry release in a Lammergeier project:
 
 ```bash
-lamc install @lam/vulture/std-plugin@1.0.0
+lamc install @lam/vulture/std-plugin@2.0.0
 ```
 
 Or declare it in the consumer's `lamlib.toml` and install the manifest:
 
 ```toml
 [dependencies]
-"@lam/vulture/std-plugin" = "1.0.0"
+"@lam/vulture/std-plugin" = "2.0.0"
 ```
 
 ```bash
@@ -42,18 +42,18 @@ lamc install
 Install the tagged Git checkout directly:
 
 ```bash
-lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@v1.0.0
+lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@v2.0.0
 ```
 
 A manifest may also pin the Git source explicitly:
 
 ```toml
 [dependencies]
-"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "v1.0.0" }
+"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "v2.0.0" }
 ```
 
 The package itself resolves `@lam/vulture` from
-`https://github.com/thallium-solutions/lam-vulture.git` at `v1.0.0`.
+`https://github.com/thallium-solutions/lam-vulture.git` at `v2.0.0`.
 
 ### Local checkout
 
@@ -71,8 +71,8 @@ replacements:
 
 ```toml
 [dependencies]
-"@lam/vulture" = "1.0.0"
-"@lam/vulture/std-plugin" = "1.0.0"
+"@lam/vulture" = "2.0.0"
+"@lam/vulture/std-plugin" = "2.0.0"
 
 [replace]
 "@lam/vulture" = { path = "../lam-vulture" }
@@ -89,7 +89,15 @@ from @lam/vulture/std-plugin import helmet, requestId
 
 ## Exports
 
-Every public symbol is re-exported by `__init__.lam`.
+Every public symbol is re-exported by `__init__.lam`. Installers accept a live
+`Server` and register typed Vulture v2 handlers and hooks. Installers whose
+configuration needs binding also expose a `*Plugin(...) -> func(Server)` factory
+for `Server.register`, including `requestLogPlugin`, `rateLimitPlugin`,
+`compressPlugin`, `healthcheckPlugin`, `metricsPlugin`, `tracingPlugin`,
+`idempotencyPlugin`, `requestIdPlugin`, `basicAuthPlugin`, `bearerAuthPlugin`,
+`ipFilterPlugin`, `cacheControlPlugin`, `sessionPlugin`, and `csrfPlugin`.
+Parameterless installers such as `helmet`, `etag`, and `serverTiming` already
+match `func(Server)` and can be passed to `register` directly.
 
 ### Request and response policy
 
@@ -138,7 +146,7 @@ survive restarts.
 
 ```lammergeier
 from @lam/vulture import Server, Request, Response
-from @lam/vulture/std-plugin import cacheControl, helmet, healthcheck, requestId
+from @lam/vulture/std-plugin import cacheControlPlugin, helmet, healthcheckPlugin, requestIdPlugin
 
 func hello(req: Request, res: Response) {
     res.json({"message": "hello", "requestId": req.id()})
@@ -147,13 +155,13 @@ func hello(req: Request, res: Response) {
 func main() {
     srv: Server = Server()
 
-    requestId(srv)
-    helmet(srv)
-    cacheControl(srv, "private, max-age=30")
-    healthcheck(srv)
+    srv.register(requestIdPlugin())
+    srv.register(helmet)
+    srv.register(cacheControlPlugin("private, max-age=30"))
+    srv.register(healthcheckPlugin())
 
     srv.get("/hello", hello)
-    srv.listen(8080)
+    _ = srv.listen(8080).unwrap()
 }
 ```
 
@@ -166,25 +174,25 @@ Most response defaults are additive and preserve an explicit handler value.
 
 ```lammergeier
 from @lam/vulture import Server, Request, Response
-from @lam/vulture/std-plugin import bearerAuth, rateLimit
+from @lam/vulture/std-plugin import bearerAuthPlugin, rateLimitPlugin
 
 func verifyToken(token: str) -> any {
     if token == "development-token" {
-        return {"name": "alice"}
+        return "alice"
     }
     return None
 }
 
 func profile(req: Request, res: Response) {
-    res.json(req.ctx["user"])
+    res.text(str(req.ctx["user"]))
 }
 
 func main() {
     srv: Server = Server()
-    rateLimit(srv, max=60, windowMs=60000)
-    bearerAuth(srv, verifyToken)
+    srv.register(rateLimitPlugin(max=60, windowMs=60000))
+    srv.register(bearerAuthPlugin(verifyToken))
     srv.get("/profile", profile)
-    srv.listen(8080)
+    _ = srv.listen(8080).unwrap()
 }
 ```
 
@@ -204,7 +212,7 @@ func refreshDownstream() {
 
 func main() {
     breaker: CircuitBreaker = CircuitBreaker(threshold=3, cooldownMs=2000)
-    result: Result = breaker.callFn(refreshDownstream)
+    result: Result = breaker.call(refreshDownstream)
     if not result.ok() {
         print("downstream unavailable: " + str(result.error))
     }
@@ -225,7 +233,7 @@ python3 tests/run_tests.py --verbose
 lamc lib run test
 ```
 
-The runner requires `lamc >= 1.17.0`, creates an isolated temporary `extlibs`
+The runner requires `lamc >= 1.18.0`, creates an isolated temporary `extlibs`
 tree, stages the sibling `lam-vulture` checkout as `@lam/vulture`, nests this
 checkout as `@lam/vulture/std-plugin`, builds every migrated consumer-style test
 with `--no-cache`, runs it, and compares stdout with its `# expect:` directives.
@@ -242,8 +250,13 @@ language and compiler work belongs to
 [`lammergeier-lang`](https://github.com/thallium-solutions/lammergeier-lang).
 Straightforward policy, collection handling, and Result construction in this
 package remain in Lam; raw Go is reserved for compression, cryptography,
-network parsing, locks and atomics, time internals, and callback/type-assertion
-boundaries.
+network parsing, locks and atomics, native I/O, and panic recovery. Public
+handlers, hooks, plugins, the circuit-breaker callback, and bearer verifier are
+Lam function types. The verifier returns `any` because claims are intentionally
+application-defined. Private native state remains `any`, and two focused
+context conversion helpers are the only compiler-driven assertion boundary:
+Vulture's heterogeneous `Context.get` returns `any`, while Lam 1.18 cannot yet
+narrow that value with a language-level type test.
 
 ## License
 

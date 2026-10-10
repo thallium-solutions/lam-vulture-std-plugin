@@ -15,7 +15,7 @@
 # expect: metrics has histogram: true
 # expect: metrics has uptime: true
 
-from @lam/vulture import Server, Request, Response
+from @lam/vulture import Server, Request, Response, InjectResponse
 from @lam/vulture/std-plugin import helmet, etag, healthcheck, markNotReady, metrics
 
 go! {
@@ -37,52 +37,34 @@ func main() {
     metrics(srv, "/metrics")
     srv.get("/cached", cachedHandler)
 
-    r: dict[str, any] = srv.inject("GET", "/cached")
-    rh: any = r["headers"]
-    nosniff: str = ""
-    csp: str = ""
-    frame: str = ""
-    etag1: str = ""
-    go! {
-        if hh, ok := rh.(map[string]string); ok {
-            nosniff = hh["X-Content-Type-Options"]
-            csp = hh["Content-Security-Policy"]
-            frame = hh["X-Frame-Options"]
-            etag1 = hh["ETag"]
-        }
-    }
-    print(f"nosniff: {nosniff}")
-    print(f"frame: {frame}")
-    print(f"csp: {csp}")
+    r: InjectResponse = srv.inject("GET", "/cached")
+    etag1: str = r.header("ETag")
+    print(f"nosniff: {r.header('X-Content-Type-Options')}")
+    print(f"frame: {r.header('X-Frame-Options')}")
+    print(f"csp: {r.header('Content-Security-Policy')}")
     print(f"etag len: {len(etag1)}")
 
     h: dict[str, str] = {"If-None-Match": etag1}
-    r2: dict[str, any] = srv.inject("GET", "/cached", "", h)
-    print(f"304 status: {r2['status']}")
-    print(f"304 body: '{r2['body']}'")
+    r2: InjectResponse = srv.inject("GET", "/cached", "", h)
+    print(f"304 status: {r2.status}")
+    print(f"304 body: '{r2.body}'")
 
-    live: dict[str, any] = srv.inject("GET", "/healthz")
-    print(f"live status: {live['status']}")
-    print(f"live body: {live['body']}")
-    ready: dict[str, any] = srv.inject("GET", "/readyz")
-    print(f"ready status: {ready['status']}")
-    print(f"ready body: {ready['body']}")
+    live: InjectResponse = srv.inject("GET", "/healthz")
+    print(f"live status: {live.status}")
+    print(f"live body: {live.body}")
+    ready: InjectResponse = srv.inject("GET", "/readyz")
+    print(f"ready status: {ready.status}")
+    print(f"ready body: {ready.body}")
     markNotReady(srv)
-    notReady: dict[str, any] = srv.inject("GET", "/readyz")
-    print(f"notready status: {notReady['status']}")
+    notReady: InjectResponse = srv.inject("GET", "/readyz")
+    print(f"notready status: {notReady.status}")
 
     for i in range(3) {
         srv.inject("GET", "/cached")
     }
-    result: dict[str, any] = srv.inject("GET", "/metrics")
-    resultBody: any = result["body"]
-    rendered: str = ""
-    go! {
-        if body, ok := resultBody.(string); ok {
-            rendered = body
-        }
-    }
-    print(f"metrics status: {result['status']}")
+    result: InjectResponse = srv.inject("GET", "/metrics")
+    rendered: str = result.body
+    print(f"metrics status: {result.status}")
     go! {
         fmt.Printf("metrics has counter: %v\n", strings.Contains(rendered, "http_requests_total"))
         fmt.Printf("metrics has histogram: %v\n", strings.Contains(rendered, "http_request_duration_seconds_bucket"))

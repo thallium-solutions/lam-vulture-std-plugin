@@ -9,8 +9,8 @@
 # expect: replay_header=1
 # expect: replay_body_equal=true
 
-from @lam/vulture import Server, Request, Response
-from @lam/vulture/std-plugin import requestId, idempotency, cacheControl
+from @lam/vulture import Server, Request, Response, InjectResponse, RouteOptions
+from @lam/vulture/std-plugin import requestIdPlugin, idempotencyPlugin, cacheControlPlugin
 from lamstrings import Strings
 
 func authGuard(req: Request, res: Response) {
@@ -35,50 +35,43 @@ func checkoutHandler(req: Request, res: Response) {
 
 func main() {
     srv: Server = Server()
-    requestId(srv)
-    idempotency(srv)
-    cacheControl(srv, "private, max-age=30")
+    srv.register(requestIdPlugin())
+    srv.register(idempotencyPlugin())
+    srv.register(cacheControlPlugin("private, max-age=30"))
     srv.preHandler(authGuard)
 
     bodySchema: str = "{\"type\":\"object\",\"required\":[\"sku\"],\"properties\":{\"sku\":{\"type\":\"string\"},\"qty\":{\"type\":\"integer\",\"minimum\":1}},\"additionalProperties\":true}"
     responseSchema: str = "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\"},\"requestId\":{\"type\":\"string\"},\"queued\":{\"type\":\"boolean\"}},\"additionalProperties\":false}"
     responseSchemas: dict[str, any] = {"202": responseSchema}
     schema: dict[str, any] = {"body": bodySchema, "response": responseSchemas}
-    opts: dict[str, any] = {"schema": schema, "summary": "Queue checkout order", "tags": ["checkout", "orders"]}
-    srv.postOpts("/checkout", checkoutHandler, opts)
+    opts: RouteOptions = RouteOptions().withSchema(schema)
+    opts.summary = "Queue checkout order"
+    opts.tags = ["checkout", "orders"]
+    srv.post("/checkout", checkoutHandler, opts)
 
     jsonHeaders: dict[str, str] = {"Content-Type": "application/json"}
-    unauth: dict[str, any] = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", jsonHeaders)
-    print("unauth_status=" + str(unauth["status"]))
+    unauth: InjectResponse = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", jsonHeaders)
+    print("unauth_status=" + str(unauth.status))
 
     authHeaders: dict[str, str] = {"Content-Type": "application/json", "Authorization": "Bearer shop-secret",
         "Idempotency-Key": "cart-42", "X-Request-Id": "cart-req-1"}
     badHeaders: dict[str, str] = {"Content-Type": "application/json", "Authorization": "Bearer shop-secret",
         "Idempotency-Key": "cart-bad", "X-Request-Id": "cart-req-bad"}
-    bad: dict[str, any] = srv.inject("POST", "/checkout", "{}", badHeaders)
-    print("bad_payload_status=" + str(bad["status"]))
+    bad: InjectResponse = srv.inject("POST", "/checkout", "{}", badHeaders)
+    print("bad_payload_status=" + str(bad.status))
 
-    first: dict[str, any] = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", authHeaders)
-    second: dict[str, any] = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", authHeaders)
-    firstBody: str = str(first["body"])
-    secondBody: str = str(second["body"])
-    firstCache: str = ""
-    firstReqId: str = ""
-    replayHeader: str = ""
-    go! {
-        if headers, ok := first["headers"].(map[string]string); ok {
-            firstCache = headers["Cache-Control"]
-            firstReqId = headers["X-Request-Id"]
-        }
-        if headers, ok := second["headers"].(map[string]string); ok {
-            replayHeader = headers["X-Idempotency-Replay"]
-        }
-    }
-    print("first_status=" + str(first["status"]))
+    first: InjectResponse = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", authHeaders)
+    second: InjectResponse = srv.inject("POST", "/checkout", "{\"sku\":\"book\",\"qty\":1}", authHeaders)
+    firstBody: str = first.body
+    secondBody: str = second.body
+    firstCache: str = first.header("Cache-Control")
+    firstReqId: str = first.header("X-Request-Id")
+    replayHeader: str = second.header("X-Idempotency-Replay")
+    print("first_status=" + str(first.status))
     print("first_has_internal=" + str(Strings.contains(firstBody, "internal")))
     print("first_cache=" + firstCache)
     print("first_reqid=" + firstReqId)
-    print("replay_status=" + str(second["status"]))
+    print("replay_status=" + str(second.status))
     print("replay_header=" + replayHeader)
     print("replay_body_equal=" + str(firstBody == secondBody))
 }

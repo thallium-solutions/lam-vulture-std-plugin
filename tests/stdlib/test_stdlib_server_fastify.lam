@@ -27,9 +27,8 @@
 # expect: listen-fired: 1
 # expect: close-fired: 1
 
-from @lam/vulture import Server, Request, Response, HttpError
+from @lam/vulture import Server, Request, Response, HttpError, InjectResponse, RouteOptions
 from @lam/vulture/std-plugin import requestId
-from lamjson import Json
 
 go! {
     import (
@@ -91,10 +90,10 @@ func orderRoute(req: Request, res: Response) {
 }
 
 func decoratorRoute(req: Request, res: Response) {
-    greeting: any = req.dec("greeting")
-    requestDecoration: any = req.dec("requestId")
-    responseDecoration: any = res.dec("respHelper")
-    res.json(Json.fromDict( {"greeting": greeting, "reqid": requestDecoration, "respdec": responseDecoration}))
+    greeting: str = str(req.dec("greeting"))
+    requestDecoration: str = str(req.dec("requestId"))
+    responseDecoration: str = str(res.dec("respHelper"))
+    res.json( {"greeting": greeting, "reqid": requestDecoration, "respdec": responseDecoration})
 }
 func httpErrRoute(req: Request, res: Response) {
     panic(HttpError(409, "dup", {"key": "x"}))
@@ -157,14 +156,8 @@ func main() {
     srv.decorateRequest("requestId", "r1")
     srv.decorateResponse("respHelper", "rd1")
     srv.get("/dec", decoratorRoute)
-    out: dict[str, any] = srv.inject("GET", "/dec")
-    body: any = out["body"]
-    bodystr: str = ""
-    go! {
-        if value, ok := body.(string); ok {
-            bodystr = value
-        }
-    }
+    out: InjectResponse = srv.inject("GET", "/dec")
+    bodystr: str = out.body
     go! {
         if strings.Contains(bodystr, `"greeting":"hello"`) {
             fmt.Println("handler-greeting: hello")
@@ -184,95 +177,70 @@ func main() {
     }
 
     srv.get("/oops", httpErrRoute)
-    errorResult: dict[str, any] = srv.inject("GET", "/oops")
-    print(f"httperr-status: {errorResult['status']}")
-    print(f"httperr-body: {errorResult['body']}")
+    errorResult: InjectResponse = srv.inject("GET", "/oops")
+    print(f"httperr-status: {errorResult.status}")
+    print(f"httperr-body: {errorResult.body}")
     srv.setErrorHandler(centralErr)
     srv.get("/panic", panicRoute)
-    panicResult: dict[str, any] = srv.inject("GET", "/panic")
-    print(f"panicerr-status: {panicResult['status']}")
-    print(f"panicerr-body: {panicResult['body']}")
+    panicResult: InjectResponse = srv.inject("GET", "/panic")
+    print(f"panicerr-status: {panicResult.status}")
+    print(f"panicerr-body: {panicResult.body}")
 
     bodySchema: str = '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}'
-    srv.postOpts("/items", itemsList, {"schema": {"body": bodySchema}})
-    bodyValidation: dict[str, any] = srv.inject("POST", "/items", "{}", {"Content-Type": "application/json"})
-    bodyValidationBody: any = bodyValidation["body"]
-    bodyValidationText: str = ""
-    go! {
-        if value, ok := bodyValidationBody.(string); ok {
-            bodyValidationText = value
-        }
-    }
+    bodyOptions: RouteOptions = RouteOptions().withSchema( {"body": bodySchema})
+    srv.post("/items", itemsList, bodyOptions)
+    bodyValidation: InjectResponse = srv.inject("POST", "/items", "{}", {"Content-Type": "application/json"})
     hasBodyValidation: bool = false
     go! {
-        hasBodyValidation = strings.Contains(bodyValidationText, "validation")
+        hasBodyValidation = strings.Contains(bodyValidation.Body, "validation")
     }
-    print(f"validate-body-status: {bodyValidation['status']}")
+    print(f"validate-body-status: {bodyValidation.status}")
     print(f"validate-body-msg-has-validation: {hasBodyValidation}")
 
     querySchema: str = '{"type":"object","required":["q"],"properties":{"q":{"type":"string"}}}'
-    srv.getOpts("/search", orderRoute, {"schema": {"querystring": querySchema}})
-    queryValidation: dict[str, any] = srv.inject("GET", "/search")
-    queryValidationBody: any = queryValidation["body"]
-    queryValidationText: str = ""
-    go! {
-        if value, ok := queryValidationBody.(string); ok {
-            queryValidationText = value
-        }
-    }
+    queryOptions: RouteOptions = RouteOptions().withSchema( {"querystring": querySchema})
+    srv.get("/search", orderRoute, queryOptions)
+    queryValidation: InjectResponse = srv.inject("GET", "/search")
     hasQueryValidation: bool = false
     go! {
-        hasQueryValidation = strings.Contains(queryValidationText, "validation")
+        hasQueryValidation = strings.Contains(queryValidation.Body, "validation")
     }
-    print(f"validate-query-status: {queryValidation['status']}")
+    print(f"validate-query-status: {queryValidation.status}")
     print(f"validate-query-msg-has-validation: {hasQueryValidation}")
 
     responseSchema: str = '{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"],"additionalProperties":false}'
-    srv.getOpts("/items/list", itemsList, {"schema": {"response": {"200": responseSchema}}})
-    responseResult: dict[str, any] = srv.inject("GET", "/items/list")
-    print(f"response-shaped-body: {responseResult['body']}")
+    responseOptions: RouteOptions = RouteOptions().withSchema( {"response": {"200": responseSchema}})
+    srv.get("/items/list", itemsList, responseOptions)
+    responseResult: InjectResponse = srv.inject("GET", "/items/list")
+    print(f"response-shaped-body: {responseResult.body}")
 
     srv.get("/shared", encapShared)
     srv.register(encapPlugin, "", true)
-    privateResult: dict[str, any] = srv.inject("GET", "/private")
-    privateHeaders: any = privateResult["headers"]
-    privateHeader: str = ""
-    go! {
-        if headers, ok := privateHeaders.(map[string]string); ok {
-            privateHeader = headers["X-Encap"]
-        }
-    }
-    print(f"encapsulated-shared-status: {privateResult['status']}")
-    print(f"encapsulated-private-header: {privateHeader}")
-    sharedResult: dict[str, any] = srv.inject("GET", "/shared")
-    sharedHeaders: any = sharedResult["headers"]
-    sharedHeader: str = ""
-    go! {
-        if headers, ok := sharedHeaders.(map[string]string); ok {
-            sharedHeader = headers["X-Encap"]
-        }
-    }
-    print("encapsulated-other-header:" + sharedHeader)
+    privateResult: InjectResponse = srv.inject("GET", "/private")
+    print(f"encapsulated-shared-status: {privateResult.status}")
+    print(f"encapsulated-private-header: {privateResult.header('X-Encap')}")
+    sharedResult: InjectResponse = srv.inject("GET", "/shared")
+    print("encapsulated-other-header:" + sharedResult.header("X-Encap"))
 
     srv2: Server = Server()
     requestId(srv2)
     srv2.get("/ridfresh", reqIdEcho)
-    fresh: dict[str, any] = srv2.inject("GET", "/ridfresh")
-    freshBody: any = fresh["body"]
-    freshText: str = ""
-    go! {
-        if value, ok := freshBody.(string); ok {
-            freshText = value
-        }
-    }
-    print(f"requestid-fresh-len: {len(freshText)}")
+    fresh: InjectResponse = srv2.inject("GET", "/ridfresh")
+    print(f"requestid-fresh-len: {len(fresh.body)}")
     existingHeaders: dict[str, str] = {"X-Request-Id": "existing-id"}
-    existing: dict[str, any] = srv2.inject("GET", "/ridfresh", "", existingHeaders)
-    print(f"requestid-passthrough: {existing['body']}")
+    existing: InjectResponse = srv2.inject("GET", "/ridfresh", "", existingHeaders)
+    print(f"requestid-passthrough: {existing.body}")
 
     srv3: Server = Server()
-    srv3.getOpts("/items", itemsList, {"summary": "List items", "operationId": "listItems", "tags": ["items"], "schema": {"response": {"200": responseSchema}}})
-    srv3.getOpts("/items/:id", itemById, {"summary": "Get item", "operationId": "getItem"})
+    listOptions: RouteOptions = RouteOptions().withSchema( {"response": {"200": responseSchema}})
+    listOptions.summary = "List items"
+    listOptions.operationId = "listItems"
+    listOptions.tags = ["items"]
+    itemOptions: RouteOptions = RouteOptions()
+    itemOptions.summary = "Get item"
+    itemOptions.operationId = "getItem"
+    srv3.get("/items", itemsList, listOptions)
+    srv3.get("/items/:id", itemById, itemOptions)
     spec: str = srv3.openapi( {"title": "T", "version": "9.9"})
     hasItems: bool = false
     hasGetItems: bool = false
@@ -290,28 +258,32 @@ func main() {
     srv4.get("/files/*", wildcardCatch)
     srv4.get("/users/:id", itemById)
     srv4.head("/h", headHandler)
-    wildcard: dict[str, any] = srv4.inject("GET", "/files/a/b/c")
-    print(f"wildcard-rest: {wildcard['body']}")
-    parameter: dict[str, any] = srv4.inject("GET", "/users/7")
-    parameterBody: any = parameter["body"]
+    wildcard: InjectResponse = srv4.inject("GET", "/files/a/b/c")
+    print(f"wildcard-rest: {wildcard.body}")
+    parameter: InjectResponse = srv4.inject("GET", "/users/7")
     go! {
-        if value, ok := parameterBody.(string); ok {
-            fmt.Printf("param-id: %s\n", strings.TrimPrefix(value, "item:"))
-        }
+        fmt.Printf("param-id: %s\n", strings.TrimPrefix(parameter.Body, "item:"))
     }
-    headResult: dict[str, any] = srv4.inject("HEAD", "/h")
-    print(f"head-status: {headResult['status']}")
+    headResult: InjectResponse = srv4.inject("HEAD", "/h")
+    print(f"head-status: {headResult.status}")
 
     srv5: Server = Server()
     readyFired: int = 0
     listenFired: int = 0
     closeFired: int = 0
-    go! {
-        srv5.OnReadyHooks = append(srv5.OnReadyHooks, func(server *Server) { readyFired = 1 })
-        srv5.OnListenHooks = append(srv5.OnListenHooks, func(server *Server) { listenFired = 1 })
-        srv5.OnCloseHooks = append(srv5.OnCloseHooks, func(server *Server) { closeFired = 1 })
+    readyHook: func(Server) = lambda(server: Server) -> None {
+        readyFired = 1
     }
-    srv5.listenBackground(0)
+    listenHook: func(Server) = lambda(server: Server) -> None {
+        listenFired = 1
+    }
+    closeHook: func(Server) = lambda(server: Server) -> None {
+        closeFired = 1
+    }
+    srv5.onReady(readyHook)
+    srv5.onListen(listenHook)
+    srv5.onClose(closeHook)
+    _ = srv5.listenBackground(0).unwrap()
     srv5.close()
     print(f"ready-fired: {readyFired}")
     print(f"listen-fired: {listenFired}")

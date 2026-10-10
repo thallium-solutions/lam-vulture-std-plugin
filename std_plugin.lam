@@ -6,6 +6,7 @@
 
 from @lam/vulture import Server, Request, Response
 from lamerrors import Result, Error
+from lamtime import Time
 
 go! {
     import (
@@ -20,7 +21,6 @@ go! {
         "net"
         "net/http"
         "os"
-        "reflect"
         "strings"
         "sync"
         "sync/atomic"
@@ -83,43 +83,78 @@ go! {
     }
 }
 
+# Context.get is intentionally heterogeneous in @lam/vulture. Lam 1.18 cannot
+# narrow ``any`` with a language-level type test, so these are the smallest safe
+# assertions needed by the otherwise typed timing hooks.
+func _contextInt(value: any) -> int {
+    go! {
+        if typed, ok := value.(int); ok {
+            return typed
+        }
+        return 0
+    }
+}
+
+func _contextStrings(value: any) -> list[str] {
+    go! {
+        if typed, ok := value.([]string); ok {
+            return typed
+        }
+        return []string{}
+    }
+}
+
+func _emitRequestLog(label: str, req: Request, res: Response, elapsedNs: int, debug: bool) {
+    #- Stderr and fixed-point formatting are the only native logging boundary. -#
+    go! {
+        ms := float64(elapsedNs) / float64(time.Millisecond)
+        if debug {
+            fmt.Fprintf(os.Stderr, "%s %s %s -> %d (%.2fms) from=%s\n",
+                label, req.Method, req.Path, res.Status, ms, req.RemoteAddr)
+        } else {
+            fmt.Fprintf(os.Stderr, "%s %s %s -> %d (%.2fms)\n",
+                label, req.Method, req.Path, res.Status, ms)
+        }
+    }
+}
+
+class _RequestLogHooks {
+    func init(self, srv: Server, label: str) {
+        self.srv: Server = srv
+        self.label: str = label
+    }
+
+    func receive(self, req: Request, res: Response) {
+        req.ctx["__lamReqLogStart"] = Time.nowUnixNano()
+    }
+
+    func respond(self, req: Request, res: Response) {
+        value: any = req.ctx.get("__lamReqLogStart", None)
+        if value == None {
+            return
+        }
+        startNs: int = _contextInt(value)
+        _emitRequestLog(self.label, req, res, Time.nowUnixNano() - startNs, self.srv.debug)
+    }
+}
+
 func requestLog(srv: Server, label: str = "[req]") {
     #- Emit a structured request line to stderr. When ``srv.debug`` is true,
-    the remote address is included. -  #
-    go! {
-        local := srv
-        onReq := func(req *Request, res *Response) {
-            req.Ctx.Set(lamReqLogKey, time.Now())
-        }
-        onResp := func(req *Request, res *Response) {
-            startVal := req.Ctx.Get(lamReqLogKey, nil)
-            if startVal == nil {
-                return
-            }
-            start, ok := startVal.(time.Time)
-            if !ok {
-                return
-            }
-            ms := float64(time.Since(start).Microseconds()) / 1000.0
-            if local.Debug {
-                fmt.Fprintf(os.Stderr, "%s %s %s -> %d (%.2fms) from=%s\n",
-                    label, req.Method, req.Path, res.Status, ms, req.RemoteAddr)
-            } else {
-                fmt.Fprintf(os.Stderr, "%s %s %s -> %d (%.2fms)\n",
-                    label, req.Method, req.Path, res.Status, ms)
-            }
-        }
-        local.OnRequestHooks = append(local.OnRequestHooks, onReq)
-        local.OnResponseHooks = append(local.OnResponseHooks, onResp)
-    }
+    the remote address is included. -#
+    hooks: _RequestLogHooks = _RequestLogHooks(srv, label)
+    srv.onRequest(hooks.receive)
+    srv.onResponse(hooks.respond)
 }
 
 func rateLimit(srv: Server, max: int = 100, windowMs: int = 60000,
 message: str = "rate limit exceeded") {
     #- Install an in-memory, per-client sliding-window limiter. -#
+    guard: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         st := newRateLimitState(max, windowMs, message)
-        guard := func(req *Request, res *Response) {
+        guard = func(req *Request, res *Response) {
             key := lamRateLimitKey(req)
             ok, remaining := st.check(key, time.Now())
             if !ok {
@@ -135,13 +170,16 @@ message: str = "rate limit exceeded") {
             res.Headers["X-RateLimit-Limit"] = fmt.Sprintf("%d", st.max)
             res.Headers["X-RateLimit-Remaining"] = fmt.Sprintf("%d", remaining)
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, guard)
     }
+    srv.onRequest(guard)
 }
 
 func compress(srv: Server, minBytes: int = 1024) {
     #- Gzip eligible buffered and streaming responses. SSE and hijacked
-    connections are deliberately left untouched. -  #
+    connections are deliberately left untouched. -#
+    onResp: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         threshold := minBytes
         wantsGzip := func(req *Request) bool {
@@ -152,7 +190,7 @@ func compress(srv: Server, minBytes: int = 1024) {
             }
             return false
         }
-        onResp := func(req *Request, res *Response) {
+        onResp = func(req *Request, res *Response) {
             if res.Hijacked || res.SseHandler != nil || !wantsGzip(req) {
                 return
             }
@@ -188,8 +226,8 @@ func compress(srv: Server, minBytes: int = 1024) {
             res.Headers["Vary"] = "Accept-Encoding"
             delete(res.Headers, "Content-Length")
         }
-        srv.OnResponseHooks = append(srv.OnResponseHooks, onResp)
     }
+    srv.onResponse(onResp)
 }
 
 # Header defaults and iteration are ordinary language-level work; only the
@@ -217,15 +255,18 @@ func _helmetHook(req: Request, res: Response) {
 
 func helmet(srv: Server) {
     #- Add conservative browser security headers without replacing headers
-    already selected by a handler. -  #
+    already selected by a handler. -#
     srv.onResponse(_helmetHook)
 }
 
 func etag(srv: Server) {
     #- Generate weak SHA-256 ETags for buffered GET/HEAD responses and honor
-    If - None - Match with a 304 response. -  #
+    If-None-Match with a 304 response. -#
+    onResp: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
-        onResp := func(req *Request, res *Response) {
+        onResp = func(req *Request, res *Response) {
             if res.StreamHandler != nil || res.SseHandler != nil || res.Hijacked {
                 return
             }
@@ -260,24 +301,30 @@ func etag(srv: Server) {
                 }
             }
         }
-        srv.OnResponseHooks = append(srv.OnResponseHooks, onResp)
     }
+    srv.onResponse(onResp)
 }
 
 func healthcheck(srv: Server, livePath: str = "/healthz", readyPath: str = "/readyz") {
     #- Register Kubernetes-style liveness and readiness routes. -#
+    liveHandler: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    readyHandler: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         var ready int32 = 1
         srv.Ctx = ensureCtx(srv.Ctx)
         srv.Ctx["__lamReadyGate"] = &ready
-        liveHandler := func(req *Request, res *Response) {
+        liveHandler = func(req *Request, res *Response) {
             res.Status = 200
             res.Headers["Content-Type"] = "text/plain; charset=utf-8"
             res.Headers["Cache-Control"] = "no-store"
             res.Body = "ok"
             res.Sent = true
         }
-        readyHandler := func(req *Request, res *Response) {
+        readyHandler = func(req *Request, res *Response) {
             gate := atomic.LoadInt32(&ready)
             res.Headers["Content-Type"] = "text/plain; charset=utf-8"
             res.Headers["Cache-Control"] = "no-store"
@@ -290,10 +337,9 @@ func healthcheck(srv: Server, livePath: str = "/healthz", readyPath: str = "/rea
             }
             res.Sent = true
         }
-        srv.Routes = append(srv.Routes,
-            lamCompileRoute("GET", livePath, liveHandler),
-            lamCompileRoute("GET", readyPath, readyHandler))
     }
+    srv.get(livePath, liveHandler)
+    srv.get(readyPath, readyHandler)
 }
 
 func markReady(srv: Server) {
@@ -316,7 +362,16 @@ func markNotReady(srv: Server) {
 
 func metrics(srv: Server, path: str = "/metrics") {
     #- Export per-method/status counters, a request-duration histogram, and
-    process uptime in Prometheus text format. -  #
+    process uptime in Prometheus text format. -#
+    onReq: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    onResp: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    scrapeHandler: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         type metricsState struct {
             mu        sync.Mutex
@@ -352,12 +407,12 @@ func metrics(srv: Server, path: str = "/metrics") {
             st.durCount++
         }
         const startKey = "__lamMetricsStart"
-        onReq := func(req *Request, res *Response) {
+        onReq = func(req *Request, res *Response) {
             if req.Path != path {
                 req.Ctx.Set(startKey, time.Now())
             }
         }
-        onResp := func(req *Request, res *Response) {
+        onResp = func(req *Request, res *Response) {
             if req.Path == path {
                 return
             }
@@ -394,28 +449,28 @@ func metrics(srv: Server, path: str = "/metrics") {
             fmt.Fprintf(&body, "process_uptime_seconds %g\n", time.Since(st.startedAt).Seconds())
             return body.String()
         }
-        scrapeHandler := func(req *Request, res *Response) {
+        scrapeHandler = func(req *Request, res *Response) {
             res.Status = 200
             res.Headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
             res.Body = render()
             res.Sent = true
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnResponseHooks = append(srv.OnResponseHooks, onResp)
-        srv.Routes = append(srv.Routes, lamCompileRoute("GET", path, scrapeHandler))
     }
+    srv.onRequest(onReq)
+    srv.onResponse(onResp)
+    srv.get(path, scrapeHandler)
 }
 
 class CircuitBreaker {
     #- Hystrix-style circuit breaker for zero-argument downstream calls.
 
-    ``callFn`` returns ``Result.Ok(None)`` on success and a structured
-    ``CircuitOpen`` or ``CircuitFailed`` error otherwise. State bookkeeping,
-    cooldown time, locking, panic recovery, and callback assertion stay at
-    the Go boundary
-    Result / error construction remains ordinary Lam. -  #
+    ``call`` returns ``Result.Ok(None)`` on success and a structured
+    ``CircuitOpen`` or ``CircuitFailed`` error otherwise. The callback is a
+    typed ``func()``; state bookkeeping, cooldown time, locking, and panic
+    recovery stay at the Go boundary while Result/error construction remains
+    ordinary Lam. -#
 
-    func __init__(self, threshold: int = 5, cooldownMs: int = 1000) {
+    func init(self, threshold: int = 5, cooldownMs: int = 1000) {
         self.threshold: int = threshold
         self.cooldownMs: int = cooldownMs
         self.failures: int = 0
@@ -437,7 +492,7 @@ class CircuitBreaker {
         return current
     }
 
-    func callFn(self, fn: any) -> Result {
+    func call(self, fn: func()) -> Result {
         allowed: bool = false
         go! {
             cs := s._state.(*circuitState)
@@ -461,12 +516,7 @@ class CircuitBreaker {
                         failureMessage = fmt.Sprintf("%v", recovered)
                     }
                 }()
-                if callback, ok := fn.(func()); ok {
-                    callback()
-                } else {
-                    failed = true
-                    failureMessage = "CircuitBreaker.callFn: fn must be func() -> None"
-                }
+                fn()
             }()
 
             completedState.mu.Lock()
@@ -489,44 +539,57 @@ class CircuitBreaker {
     }
 }
 
+func _serverTimingDuration(elapsedNs: int) -> str {
+    hundredths: int = elapsedNs // 10000
+    whole: int = hundredths // 100
+    fraction: int = hundredths % 100
+    fractionText: str = str(fraction)
+    if fraction < 10 {
+        fractionText = "0" + fractionText
+    }
+    return str(whole) + "." + fractionText
+}
+
+func _serverTimingReceive(req: Request, res: Response) {
+    req.ctx["__lamSrvTimingStart"] = Time.nowUnixNano()
+    if "__lamSrvTimingMarks" not in req.ctx {
+        marks: list[str] = []
+        req.ctx["__lamSrvTimingMarks"] = marks
+    }
+}
+
+func _serverTimingSend(req: Request, res: Response) {
+    value: any = req.ctx.get("__lamSrvTimingStart", None)
+    if value == None {
+        return
+    }
+    startNs: int = _contextInt(value)
+    entries: list[str] = ["total;dur=" + _serverTimingDuration(Time.nowUnixNano() - startNs)]
+    marks: list[str] = _contextStrings(req.ctx.get("__lamSrvTimingMarks", None))
+    entries.extend(marks)
+    rendered: str = ", ".join(entries)
+    if "Server-Timing" in res.headers and res.headers["Server-Timing"] != "" {
+        rendered = res.headers["Server-Timing"] + ", " + rendered
+    }
+    res.headers["Server-Timing"] = rendered
+}
+
 func serverTiming(srv: Server) {
     #- Add an RFC 8290 total duration and optional application marks to the
-    Server - Timing response header. -  #
-    go! {
-        const startKey = "__lamSrvTimingStart"
-        const marksKey = "__lamSrvTimingMarks"
-        onReq := func(req *Request, res *Response) {
-            req.Ctx.Set(startKey, time.Now())
-            if !req.Ctx.Has(marksKey) {
-                req.Ctx.Set(marksKey, []string{})
-            }
-        }
-        onSend := func(req *Request, res *Response) {
-            if res.Headers == nil {
-                res.Headers = map[string]string{}
-            }
-            start, ok := req.Ctx.Get(startKey, nil).(time.Time)
-            if !ok {
-                return
-            }
-            ms := float64(time.Since(start).Microseconds()) / 1000.0
-            entries := []string{fmt.Sprintf("total;dur=%.2f", ms)}
-            if marks, ok := req.Ctx.Get(marksKey, nil).([]string); ok {
-                entries = append(entries, marks...)
-            }
-            if existing := res.Headers["Server-Timing"]; existing != "" {
-                entries = append([]string{existing}, entries...)
-            }
-            res.Headers["Server-Timing"] = strings.Join(entries, ", ")
-        }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnSendHooks = append(srv.OnSendHooks, onSend)
-    }
+    Server-Timing response header. -#
+    srv.onRequest(_serverTimingReceive)
+    srv.onSend(_serverTimingSend)
 }
 
 func tracing(srv: Server, echoHeader: bool = true) {
     #- Propagate W3C traceparent/tracestate, minting cryptographically random
-    IDs when an inbound context is absent or malformed. -  #
+    IDs when an inbound context is absent or malformed. -#
+    onReq: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    onSend: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         parseParent := func(value string) (traceID, spanID string, ok bool) {
             parts := strings.Split(value, "-")
@@ -542,7 +605,7 @@ func tracing(srv: Server, echoHeader: bool = true) {
             }
             return hex.EncodeToString(b)
         }
-        onReq := func(req *Request, res *Response) {
+        onReq = func(req *Request, res *Response) {
             parent := ""
             state := ""
             for key, value := range req.Headers {
@@ -566,7 +629,7 @@ func tracing(srv: Server, echoHeader: bool = true) {
                 req.Ctx.Set("__lamTraceState", state)
             }
         }
-        onSend := func(req *Request, res *Response) {
+        onSend = func(req *Request, res *Response) {
             if !echoHeader {
                 return
             }
@@ -584,22 +647,25 @@ func tracing(srv: Server, echoHeader: bool = true) {
                 }
             }
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnSendHooks = append(srv.OnSendHooks, onSend)
-        if srv.Decorators == nil {
-            srv.Decorators = map[string]interface{}{}
-        }
-        srv.Decorators["_tracingEnabled"] = true
     }
+    srv.onRequest(onReq)
+    srv.onSend(onSend)
+    srv.decorate("_tracingEnabled", true)
 }
 
 func idempotency(srv: Server, header: str = "Idempotency-Key", ttlSec: int = 300) {
     #- Replay successful POST/PUT/PATCH responses for duplicate idempotency
-    keys. Entries live in a process - local, lock - protected TTL cache. -  #
+    keys. Entries live in a process-local, lock-protected TTL cache. -#
+    onReq: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    onSend: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         store := newIdemStore(time.Duration(ttlSec) * time.Second)
         canonical := header
-        onReq := func(req *Request, res *Response) {
+        onReq = func(req *Request, res *Response) {
             method := strings.ToUpper(req.Method)
             if method != "POST" && method != "PUT" && method != "PATCH" {
                 return
@@ -629,7 +695,7 @@ func idempotency(srv: Server, header: str = "Idempotency-Key", ttlSec: int = 300
             }
             req.Ctx.Set("__lamIdemKey", key)
         }
-        onSend := func(req *Request, res *Response) {
+        onSend = func(req *Request, res *Response) {
             key, ok := req.Ctx.Get("__lamIdemKey", nil).(string)
             if !ok || key == "" || res.Status >= 500 {
                 return
@@ -640,16 +706,16 @@ func idempotency(srv: Server, header: str = "Idempotency-Key", ttlSec: int = 300
             }
             store.put(key, &idemEntry{status: res.Status, headers: headers, body: res.Body})
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnSendHooks = append(srv.OnSendHooks, onSend)
     }
+    srv.onRequest(onReq)
+    srv.onSend(onSend)
 }
 
 # Request ID lookup, context storage, and response-header precedence are
 # language-level control flow. Only ID generation remains in Go because the
 # runtime implementation combines crypto/rand with an atomic sequence.
 class _RequestIdHooks {
-    func __init__(self, header: str) {
+    func init(self, header: str) {
         self.header: str = header
     }
 
@@ -763,7 +829,7 @@ func _unauthorized(res: Response, challenge: str) {
 # Credential copying, lookup, and failure control flow live in Lam. Base64
 # decoding and constant-time comparison remain at the crypto boundary.
 class _BasicAuthHooks {
-    func __init__(self, users: dict[str, str], realm: str) {
+    func init(self, users: dict[str, str], realm: str) {
         self.users: dict[str, str] = {}
         for username, password in users {
             self.users[username] = password
@@ -807,16 +873,16 @@ class _BasicAuthHooks {
 
 func basicAuth(srv: Server, users: dict[str, str], realm: str = "Restricted") {
     #- Require HTTP Basic credentials and expose the accepted username at
-    ``req.ctx["user"]``. Use only over TLS. -  #
+    ``req.ctx["user"]``. Use only over TLS. -#
     hooks: _BasicAuthHooks = _BasicAuthHooks(users, realm)
     srv.onRequest(hooks.receive)
 }
 
-# Bearer framing and rejection are Lam-level policy. Dynamic callback invocation
-# and type assertions remain in Go because verifier callables cross that bridge.
+# Bearer framing and rejection are Lam-level policy. The verifier is typed while
+# its claim payload remains intentionally heterogeneous.
 class _BearerAuthHooks {
-    func __init__(self, verify: any, header: str) {
-        self.verify: any = verify
+    func init(self, verify: func(str) -> any, header: str) {
+        self.verify: func(str) -> any = verify
         self.header: str = header
     }
 
@@ -852,15 +918,15 @@ class _BearerAuthHooks {
     }
 }
 
-func bearerAuth(srv: Server, verify: any, header: str = "Authorization") {
+func bearerAuth(srv: Server, verify: func(str) -> any, header: str = "Authorization") {
     #- Validate Bearer tokens with ``verify(token)`` and store accepted claims at
-    ``req.ctx["user"]``. -  #
+    ``req.ctx["user"]``. -#
     hooks: _BearerAuthHooks = _BearerAuthHooks(verify, header)
     srv.onRequest(hooks.receive)
 }
 
 class _IpFilterHooks {
-    func __init__(self, allow: list[str], deny: list[str]) {
+    func init(self, allow: list[str], deny: list[str]) {
         self.allowNets: any = None
         self.denyNets: any = None
         go! {
@@ -892,14 +958,14 @@ class _IpFilterHooks {
 
 func ipFilter(srv: Server, allow: list[str] = [], deny: list[str] = []) {
     #- Allow and deny exact client IPs or CIDR ranges. Trust-proxy settings from
-    @lam/vulture are honored. -  #
+    @lam/vulture are honored. -#
     hooks: _IpFilterHooks = _IpFilterHooks(allow, deny)
     srv.onRequest(hooks.receive)
 }
 
 # Cache header selection is pure policy and needs no inline Go.
 class _CacheControlHooks {
-    func __init__(self, directive: str, ifMissing: bool) {
+    func init(self, directive: str, ifMissing: bool) {
         self.directive: str = directive
         self.ifMissing: bool = ifMissing
     }
@@ -914,7 +980,7 @@ class _CacheControlHooks {
 
 func cacheControl(srv: Server, directive: str = "no-store", ifMissing: bool = true) {
     #- Select a default Cache-Control response header. Explicit handler values
-    win unless ``ifMissing`` is false. -  #
+    win unless ``ifMissing`` is false. -#
     hooks: _CacheControlHooks = _CacheControlHooks(directive, ifMissing)
     srv.onSend(hooks.send)
 }
@@ -922,10 +988,16 @@ func cacheControl(srv: Server, directive: str = "no-store", ifMissing: bool = tr
 func session(srv: Server, secret: str, cookieName: str = "sid", maxAge: int = 86400,
 secure: bool = false, sameSite: str = "Lax") {
     #- Install process-local signed-cookie sessions. Session dictionaries are
-    available at ``req.ctx["session"]``. -  #
+    available at ``req.ctx["session"]``. -#
+    onReq: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    onSend: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         store := newLamSessionStore()
-        onReq := func(req *Request, res *Response) {
+        onReq = func(req *Request, res *Response) {
             raw := lamPluginCookie(req, cookieName)
             if raw == "" {
                 req.Ctx.Set("session", map[string]interface{}{})
@@ -941,7 +1013,7 @@ secure: bool = false, sameSite: str = "Lax") {
             req.Ctx.Set("__lamSessionSid", sid)
             req.Ctx.Set("session", store.load(sid))
         }
-        onSend := func(req *Request, res *Response) {
+        onSend = func(req *Request, res *Response) {
             data, _ := req.Ctx.Get("session", nil).(map[string]interface{})
             sid, _ := req.Ctx.Get("__lamSessionSid", nil).(string)
             if len(data) == 0 {
@@ -958,21 +1030,27 @@ secure: bool = false, sameSite: str = "Lax") {
             cookie := lamServerBuildCookie(cookieName, signed, "/", maxAge, "", secure, true, sameSite)
             res.Headers["Set-Cookie"] = lamServerAppendCookie(res.Headers["Set-Cookie"], cookie)
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnSendHooks = append(srv.OnSendHooks, onSend)
     }
+    srv.onRequest(onReq)
+    srv.onSend(onSend)
 }
 
 func csrf(srv: Server, secret: str, cookieName: str = "csrf",
 headerName: str = "X-CSRF-Token",
 safeMethods: list[str] = ["GET", "HEAD", "OPTIONS"]) {
     #- Protect unsafe methods with a signed double-submit cookie token. -#
+    onReq: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
+    onSend: func(Request, Response) = lambda(req: Request, res: Response) -> None {
+        pass
+    }
     go! {
         safe := map[string]bool{}
         for _, method := range safeMethods {
             safe[strings.ToUpper(method)] = true
         }
-        onReq := func(req *Request, res *Response) {
+        onReq = func(req *Request, res *Response) {
             if safe[strings.ToUpper(req.Method)] {
                 return
             }
@@ -1005,7 +1083,7 @@ safeMethods: list[str] = ["GET", "HEAD", "OPTIONS"]) {
                 res.Sent = true
             }
         }
-        onSend := func(req *Request, res *Response) {
+        onSend = func(req *Request, res *Response) {
             if res.Headers == nil {
                 res.Headers = map[string]string{}
             }
@@ -1018,8 +1096,100 @@ safeMethods: list[str] = ["GET", "HEAD", "OPTIONS"]) {
             res.Headers["Set-Cookie"] = lamServerAppendCookie(res.Headers["Set-Cookie"], cookie)
             res.Headers[headerName] = token
         }
-        srv.OnRequestHooks = append(srv.OnRequestHooks, onReq)
-        srv.OnSendHooks = append(srv.OnSendHooks, onSend)
+    }
+    srv.onRequest(onReq)
+    srv.onSend(onSend)
+}
+
+# Configured installers cannot be passed directly to ``Server.register`` because
+# it accepts ``func(Server)``. These factories bind options while preserving the
+# fully typed v2 plugin signature.
+func requestLogPlugin(label: str = "[req]") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        requestLog(srv, label)
+    }
+}
+
+func rateLimitPlugin(max: int = 100, windowMs: int = 60000,
+message: str = "rate limit exceeded") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        rateLimit(srv, max, windowMs, message)
+    }
+}
+
+func compressPlugin(minBytes: int = 1024) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        compress(srv, minBytes)
+    }
+}
+
+func healthcheckPlugin(livePath: str = "/healthz", readyPath: str = "/readyz") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        healthcheck(srv, livePath, readyPath)
+    }
+}
+
+func metricsPlugin(path: str = "/metrics") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        metrics(srv, path)
+    }
+}
+
+func tracingPlugin(echoHeader: bool = true) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        tracing(srv, echoHeader)
+    }
+}
+
+func idempotencyPlugin(header: str = "Idempotency-Key", ttlSec: int = 300) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        idempotency(srv, header, ttlSec)
+    }
+}
+
+func requestIdPlugin(header: str = "X-Request-Id") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        requestId(srv, header)
+    }
+}
+
+func basicAuthPlugin(users: dict[str, str], realm: str = "Restricted") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        basicAuth(srv, users, realm)
+    }
+}
+
+func bearerAuthPlugin(verify: func(str) -> any,
+header: str = "Authorization") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        bearerAuth(srv, verify, header)
+    }
+}
+
+func ipFilterPlugin(allow: list[str] = [], deny: list[str] = []) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        ipFilter(srv, allow, deny)
+    }
+}
+
+func cacheControlPlugin(directive: str = "no-store", ifMissing: bool = true) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        cacheControl(srv, directive, ifMissing)
+    }
+}
+
+func sessionPlugin(secret: str, cookieName: str = "sid", maxAge: int = 86400,
+secure: bool = false, sameSite: str = "Lax") -> func(Server) {
+    return lambda(srv: Server) -> None {
+        session(srv, secret, cookieName, maxAge, secure, sameSite)
+    }
+}
+
+func csrfPlugin(secret: str, cookieName: str = "csrf",
+headerName: str = "X-CSRF-Token",
+safeMethods: list[str] = ["GET", "HEAD", "OPTIONS"]) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        csrf(srv, secret, cookieName, headerName, safeMethods)
     }
 }
 
@@ -1078,55 +1248,30 @@ go! {
         return host
     }
 
-    func lamServerCallVerify(fn interface{}, token string) interface{} {
+    func lamServerCallVerify(fn func(string) interface{}, token string) interface{} {
         if fn == nil {
             return nil
         }
-        value := reflect.ValueOf(fn)
-        if value.Kind() != reflect.Func {
-            return nil
-        }
-        output := value.Call([]reflect.Value{reflect.ValueOf(token)})
-        if len(output) == 0 {
-            return nil
-        }
-        first := output[0].Interface()
-        if len(output) > 1 {
-            if ok, _ := output[1].Interface().(bool); !ok {
-                return nil
-            }
-        }
-        return first
+        return fn(token)
     }
 
-    func lamServerParseCIDRs(list interface{}) ([]*net.IPNet, error) {
+    func lamServerParseCIDRs(list []string) ([]*net.IPNet, error) {
         output := []*net.IPNet{}
-        value := reflect.ValueOf(list)
-        if !value.IsValid() {
-            return output, nil
-        }
-        switch value.Kind() {
-        case reflect.Slice, reflect.Array:
-            for i := 0; i < value.Len(); i++ {
-                item, ok := value.Index(i).Interface().(string)
-                if !ok {
-                    continue
+        for _, raw := range list {
+            item := strings.TrimSpace(raw)
+            if item == "" {
+                continue
+            }
+            if !strings.Contains(item, "/") {
+                if strings.Contains(item, ":") {
+                    item += "/128"
+                } else {
+                    item += "/32"
                 }
-                item = strings.TrimSpace(item)
-                if item == "" {
-                    continue
-                }
-                if !strings.Contains(item, "/") {
-                    if strings.Contains(item, ":") {
-                        item += "/128"
-                    } else {
-                        item += "/32"
-                    }
-                }
-                _, network, err := net.ParseCIDR(item)
-                if err == nil {
-                    output = append(output, network)
-                }
+            }
+            _, network, err := net.ParseCIDR(item)
+            if err == nil {
+                output = append(output, network)
             }
         }
         return output, nil
