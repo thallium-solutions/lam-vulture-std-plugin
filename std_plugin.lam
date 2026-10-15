@@ -124,7 +124,7 @@ class _RequestLogHooks {
         self.label: str = label
     }
 
-    func receive(self, req: Request, res: Response) {
+    func receive(self, req: Request, _res: Response) {
         req.ctx["__lamReqLogStart"] = Time.nowUnixNano()
     }
 
@@ -550,7 +550,7 @@ func _serverTimingDuration(elapsedNs: int) -> str {
     return str(whole) + "." + fractionText
 }
 
-func _serverTimingReceive(req: Request, res: Response) {
+func _serverTimingReceive(req: Request, _res: Response) {
     req.ctx["__lamSrvTimingStart"] = Time.nowUnixNano()
     if "__lamSrvTimingMarks" not in req.ctx {
         marks: list[str] = []
@@ -719,7 +719,7 @@ class _RequestIdHooks {
         self.header: str = header
     }
 
-    func receive(self, req: Request, res: Response) {
+    func receive(self, req: Request, _res: Response) {
         requestIdValue: str = req.header(self.header)
         if requestIdValue == "" {
             go! {
@@ -821,9 +821,9 @@ go! {
 }
 
 func _unauthorized(res: Response, challenge: str) {
-    res.setHeader("WWW-Authenticate", challenge)
-    res.setStatus(401)
-    res.text("401 unauthorized")
+    _ = res.setHeader("WWW-Authenticate", challenge)
+    _ = res.setStatus(401)
+    _ = res.text("401 unauthorized")
 }
 
 # Credential copying, lookup, and failure control flow live in Lam. Base64
@@ -950,8 +950,8 @@ class _IpFilterHooks {
             }
         }
         if rejection != "" {
-            res.setStatus(403)
-            res.text(rejection)
+            _ = res.setStatus(403)
+            _ = res.text(rejection)
         }
     }
 }
@@ -970,7 +970,7 @@ class _CacheControlHooks {
         self.ifMissing: bool = ifMissing
     }
 
-    func send(self, req: Request, res: Response) {
+    func send(self, _req: Request, res: Response) {
         if self.ifMissing and "Cache-Control" in res.headers {
             return
         }

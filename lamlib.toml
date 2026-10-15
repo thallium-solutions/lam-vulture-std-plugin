@@ -1,6 +1,6 @@
 [library]
 name = "@lam/vulture/std-plugin"
-version = "2.0.0"
+version = "2.0.1"
 description = "Common server plugins and circuit-breaking utilities for @lam/vulture"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
