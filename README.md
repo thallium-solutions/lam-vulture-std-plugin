@@ -13,24 +13,24 @@ and is the standalone continuation of Lammergeier's original
 - `lamc` 1.18.0 or a compatible later 1.x release (`^1.18`).
 - Go, used by `lamc` for compression, cryptography, networking, concurrency,
   timekeeping, and runtime callback bridges.
-- `@lam/vulture` v2.0.0. A Git dependency pinned to the v2.0.0 tag is declared
+- `@lam/vulture` 2.0.1. A Git dependency pinned to the 2.0.1 tag is declared
   in `lamlib.toml` and is installed transitively.
 
 ## Installation
 
 ### Registry
 
-Install the v2.0.0 registry release in a Lammergeier project:
+Install the 2.0.2 registry release in a Lammergeier project:
 
 ```bash
-lamc install @lam/vulture/std-plugin@2.0.0
+lamc install @lam/vulture/std-plugin@2.0.2
 ```
 
 Or declare it in the consumer's `lamlib.toml` and install the manifest:
 
 ```toml
 [dependencies]
-"@lam/vulture/std-plugin" = "2.0.0"
+"@lam/vulture/std-plugin" = "2.0.2"
 ```
 
 ```bash
@@ -42,18 +42,18 @@ lamc install
 Install the tagged Git checkout directly:
 
 ```bash
-lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@v2.0.0
+lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@2.0.2
 ```
 
 A manifest may also pin the Git source explicitly:
 
 ```toml
 [dependencies]
-"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "v2.0.0" }
+"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "2.0.2" }
 ```
 
 The package itself resolves `@lam/vulture` from
-`https://github.com/thallium-solutions/lam-vulture.git` at `v2.0.0`.
+`https://github.com/thallium-solutions/lam-vulture.git` at `2.0.1` (tags are plain versions, without a `v` prefix).
 
 ### Local checkout
 
@@ -72,7 +72,7 @@ replacements:
 ```toml
 [dependencies]
 "@lam/vulture" = "2.0.0"
-"@lam/vulture/std-plugin" = "2.0.0"
+"@lam/vulture/std-plugin" = "2.0.2"
 
 [replace]
 "@lam/vulture" = { path = "../lam-vulture" }
