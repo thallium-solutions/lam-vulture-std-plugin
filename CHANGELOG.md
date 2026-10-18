@@ -2,6 +2,14 @@
 
 All notable changes to `@lam/vulture/std-plugin` are documented here.
 
+## [2.0.3] - 2026-10-18
+
+### Changed
+
+- Compatible with `lamc` 2.x: `compatibility.lamc = ">=1.18, <3"` (the test
+  runner accepts the same range). Tested with `lamc` 2.0.0; no API change.
+- Pins `@lam/vulture` 2.0.2.
+
 ## 2.0.2 - 2026-10-16
 
 ### Fixed
