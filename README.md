@@ -10,7 +10,7 @@ and is the standalone continuation of Lammergeier's original
 
 ## Requirements
 
-- `lamc` 1.18.0 or newer, including 2.x (`>=1.18, <3`).
+- `lamc` 1.18.0 or newer, including 2.x (`>=1.18, <4`).
 - Go, used by `lamc` for compression, cryptography, networking, concurrency,
   timekeeping, and runtime callback bridges.
 - `@lam/vulture` 2.0.2. A Git dependency pinned to the 2.0.2 tag is declared

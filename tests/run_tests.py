@@ -58,9 +58,9 @@ def require_compiler() -> bool:
         print(f"error: unrecognized {COMPILER} version: {version_text!r}", file=sys.stderr)
         return False
     version = tuple(int(part) for part in match.groups())
-    if not (MIN_COMPILER_VERSION <= version < (3, 0, 0)):
+    if not (MIN_COMPILER_VERSION <= version < (4, 0, 0)):
         print(
-            f"error: tests require lamc >=1.18, <3; found {version_text}",
+            f"error: tests require lamc >=1.18, <4; found {version_text}",
             file=sys.stderr,
         )
         return False
