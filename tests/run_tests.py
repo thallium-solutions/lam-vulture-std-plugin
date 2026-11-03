@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VULTURE_ROOT = ROOT.parent / "lam-vulture"
 COMPILER = "lamc"
-MIN_COMPILER_VERSION = (1, 18, 0)
+MIN_COMPILER_VERSION = (4, 0, 0)
 VERSION_PATTERN = re.compile(r"(?:lamc\s+)?v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
 IGNORES = shutil.ignore_patterns(
     ".git",
@@ -58,9 +58,9 @@ def require_compiler() -> bool:
         print(f"error: unrecognized {COMPILER} version: {version_text!r}", file=sys.stderr)
         return False
     version = tuple(int(part) for part in match.groups())
-    if not (MIN_COMPILER_VERSION <= version < (4, 0, 0)):
+    if not (MIN_COMPILER_VERSION <= version < (5, 0, 0)):
         print(
-            f"error: tests require lamc >=1.18, <4; found {version_text}",
+            f"error: tests require lamc >=4.0, <5; found {version_text}",
             file=sys.stderr,
         )
         return False

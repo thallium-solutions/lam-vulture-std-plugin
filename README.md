@@ -10,7 +10,7 @@ and is the standalone continuation of Lammergeier's original
 
 ## Requirements
 
-- `lamc` 1.18.0 or newer, including 2.x (`>=1.18, <4`).
+- `lamc` 4.0 or newer (`>=4.0, <5`), with `@lam/vulture` 3.0.0.
 - Go, used by `lamc` for compression, cryptography, networking, concurrency,
   timekeeping, and runtime callback bridges.
 - `@lam/vulture` 2.0.2. A Git dependency pinned to the 2.0.2 tag is declared
@@ -233,7 +233,7 @@ python3 tests/run_tests.py --verbose
 lamc lib run test
 ```
 
-The runner requires `lamc >= 1.18.0`, creates an isolated temporary `extlibs`
+The runner requires `lamc >= 4.0.0`, creates an isolated temporary `extlibs`
 tree, stages the sibling `lam-vulture` checkout as `@lam/vulture`, nests this
 checkout as `@lam/vulture/std-plugin`, builds every migrated consumer-style test
 with `--no-cache`, runs it, and compares stdout with its `# expect:` directives.
