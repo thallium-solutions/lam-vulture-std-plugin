@@ -2,6 +2,29 @@
 
 All notable changes to `@lam/vulture/std-plugin` are documented here.
 
+## [2.0.6] - 2026-11-14
+
+### Fixed
+
+- `metrics`: the `http_request_duration_seconds` histogram counts each
+  request once. Every bucket whose limit was at least the duration was
+  incremented and then accumulated again when rendering, so a fast request
+  counted 11 times in the `+Inf` bucket and the buckets disagreed with
+  `_count` (Prometheus quantiles were wrong). It is counted in its smallest
+  bucket and the cumulative `le` buckets end at `_count`.
+
+### Tests
+
+- `tests/stdlib/test_stdlib_session_csrf_health_metrics.lam`: `session` and
+  `sessionPlugin` (non-ASCII values, cookie flags, custom name/`Secure`/
+  `SameSite`, tampered and unknown cookies, emptied sessions forgotten, 24
+  concurrent users from async tasks), `csrf` and `csrfPlugin` (tokens on safe
+  methods, missing/mismatched/forged tokens, custom header matched
+  case-insensitively, custom safe methods), `healthcheckPlugin` with
+  `markReady`/`markNotReady`, and `metricsPlugin` counters and histogram
+  (the regression above), all previously untested.
+- README: the pinned `@lam/vulture` is 3.0.0 (it said 2.0.1).
+
 ## [2.0.5] - 2026-11-03
 
 ### Changed

@@ -393,11 +393,14 @@ func metrics(srv: Server, path: str = "/metrics") {
             defer st.mu.Unlock()
             key := fmt.Sprintf("%s|%d", strings.ToUpper(method), status)
             st.counters[key]++
+            // One count per observation, in its smallest bucket; render()
+            // accumulates them into the cumulative le="..." buckets.
             placed := false
             for i, limit := range st.buckets {
                 if duration <= limit {
                     st.histogram[i]++
                     placed = true
+                    break
                 }
             }
             if !placed {

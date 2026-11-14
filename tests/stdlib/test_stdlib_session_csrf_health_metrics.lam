@@ -1,0 +1,216 @@
+# Test: the std-plugin installers no other test covers — `session` /
+# `sessionPlugin`, `csrf` / `csrfPlugin`, `healthcheckPlugin` with
+# `markReady` / `markNotReady`, `metricsPlugin` — through `inject`, plus
+# concurrent sessions from async tasks.
+#
+#   * Sessions: a login stores non-ASCII values; the signed cookie (HttpOnly,
+#     SameSite, Max-Age, Secure when asked, a custom name) brings them back;
+#     a tampered signature or an unknown cookie starts an empty session;
+#     emptying the session forgets it server-side; 24 concurrent users keep
+#     their own sessions.
+#   * CSRF: safe methods pass and receive a token (cookie and header);
+#     unsafe methods need the header and cookie to match and the cookie to
+#     be signed (missing, mismatch, forged); a custom header name is matched
+#     case-insensitively; custom safe methods.
+#   * Health: liveness always 200, readiness toggled.
+#   * Metrics: counters per method and status, cumulative histogram buckets
+#     (every bucket <= `_count`, `+Inf` == `_count`, 2.0.6 fix), the scrape
+#     path not counted.
+#
+# expect: login: 200 cookie=sid flags=HttpOnly,SameSite=Lax,Max-Age=3600
+# expect: session back: Zoë 🦅 visits=2
+# expect: tampered: anonymous
+# expect: unknown sid: anonymous
+# expect: logout forgets: anonymous
+# expect: custom cookie: app_session secure=true samesite=Strict
+# expect: concurrent sessions: 24/24
+# expect: csrf get: 200 token=true cookie=true
+# expect: csrf missing: 403 csrf: token missing
+# expect: csrf mismatch: 403 csrf: token mismatch
+# expect: csrf forged: 403 csrf: cookie invalid
+# expect: csrf ok: 200 created
+# expect: csrf custom header: 200 created
+# expect: csrf custom safe methods: GET=403 REPORT=200
+# expect: health: live=200 ready=200 not-ready=503 not ready ready-again=200
+# expect: metrics: GET|200=3 POST|201=1 GET|404=1 scrapes-uncounted=true
+# expect: histogram: cumulative=true inf-equals-count=true count=5
+# expect: ok
+
+from @lam/vulture import Server, Request, Response, InjectResponse
+from @lam/vulture/std-plugin import session, sessionPlugin, csrf, csrfPlugin, healthcheckPlugin, markReady, markNotReady, metricsPlugin
+
+func cookieValue(setCookie: str, name: str) -> str {
+    for part in setCookie.split(";") {
+        item: str = part.trim()
+        if item.startsWith(name + "=") {
+            return item[len(name) + 1:]
+        }
+    }
+    return ""
+}
+
+func login(req: Request, res: Response) {
+    data: dict[str, any] = req.ctx["session"]
+    data["user"] = req.query["name"]
+    data["visits"] = 1
+    res.text("logged in")
+}
+
+func whoami(req: Request, res: Response) {
+    data: dict[str, any] = req.ctx["session"]
+    if "user" not in data {
+        res.text("anonymous")
+        return
+    }
+    visits: int = data["visits"]
+    data["visits"] = visits + 1
+    res.text(f"{data['user']} visits={visits + 1}")
+}
+
+func logout(req: Request, res: Response) {
+    data: dict[str, any] = req.ctx["session"]
+    # WORKAROUND (lamc 4.14.0 bug, /tmp/lam-pkg-compiler-bugs/
+    # dict_keys_comprehension_del.lam): `for key in [k for k, _ in data]`
+    # over a dict[str, any] loses the key type; annotate the key list.
+    keys: list[str] = [k for k, _ in data]
+    for key in keys {
+        del data[key]
+    }
+    res.text("bye")
+}
+
+func created(_req: Request, res: Response) {
+    res.text("created")
+}
+
+func page(_req: Request, res: Response) {
+    res.text("page")
+}
+
+func posted(_req: Request, res: Response) {
+    res.code(201).text("posted")
+}
+
+async func userTask(srv: Server, i: int) -> bool {
+    first: InjectResponse = srv.inject("GET", f"/login?name=user-{i}")
+    cookie: str = cookieValue(first.header("Set-Cookie"), "sid")
+    again: InjectResponse = srv.inject("GET", "/whoami", "", {"Cookie": "sid=" + cookie})
+    return again.body == f"user-{i} visits=2"
+}
+
+func main() {
+    # ── Sessions ────────────────────────────────────────────────
+    srv: Server = Server()
+    session(srv, "session-secret", "sid", 3600)
+    srv.get("/login", login)
+    srv.get("/whoami", whoami)
+    srv.get("/logout", logout)
+    first: InjectResponse = srv.inject("GET", "/login?name=Zo%C3%AB%20%F0%9F%A6%85")
+    setCookie: str = first.header("Set-Cookie")
+    cookie: str = cookieValue(setCookie, "sid")
+    flags: list[str] = [f for f in ["HttpOnly", "SameSite=Lax", "Max-Age=3600"] if f in setCookie]
+    print(f"login: {first.status} cookie={'sid' if cookie != '' else 'none'} flags={','.join(flags)}")
+    print(f"session back: {srv.inject('GET', '/whoami', '', {'Cookie': 'sid=' + cookie}).body}")
+    tampered: str = cookie[:len(cookie) - 2] + ("aa" if not cookie.endsWith("aa") else "bb")
+    print(f"tampered: {srv.inject('GET', '/whoami', '', {'Cookie': 'sid=' + tampered}).body}")
+    other: Server = Server()
+    session(other, "session-secret")
+    other.get("/whoami", whoami)
+    print(f"unknown sid: {other.inject('GET', '/whoami', '', {'Cookie': 'sid=' + cookie}).body}")
+    _ = srv.inject("GET", "/logout", "", {"Cookie": "sid=" + cookie})
+    print(f"logout forgets: {srv.inject('GET', '/whoami', '', {'Cookie': 'sid=' + cookie}).body}")
+
+    custom: Server = Server()
+    custom.register(sessionPlugin("other-secret", "app_session", 60, true, "Strict"))
+    custom.get("/login", login)
+    customCookie: str = custom.inject("GET", "/login?name=x").header("Set-Cookie")
+    print(f"custom cookie: {customCookie.split('=')[0]} secure={'Secure' in customCookie} samesite={'Strict' if 'SameSite=Strict' in customCookie else customCookie}")
+
+    pending = [userTask(srv, i) for i in range(24)]
+    good: int = 0
+    for task in pending {
+        if await task {
+            good++
+        }
+    }
+    print(f"concurrent sessions: {good}/24")
+
+    # ── CSRF ────────────────────────────────────────────────────
+    guarded: Server = Server()
+    csrf(guarded, "csrf-secret")
+    guarded.get("/form", page)
+    guarded.post("/items", created)
+    form: InjectResponse = guarded.inject("GET", "/form")
+    token: str = form.header("X-CSRF-Token")
+    csrfCookie: str = cookieValue(form.header("Set-Cookie"), "csrf")
+    print(f"csrf get: {form.status} token={token != ''} cookie={csrfCookie == token}")
+    missing: InjectResponse = guarded.inject("POST", "/items", "", {"Cookie": "csrf=" + csrfCookie})
+    print(f"csrf missing: {missing.status} {missing.body}")
+    otherToken: str = guarded.inject("GET", "/form").header("X-CSRF-Token")
+    mismatch: InjectResponse = guarded.inject("POST", "/items", "", {"Cookie": "csrf=" + csrfCookie, "X-CSRF-Token": otherToken})
+    print(f"csrf mismatch: {mismatch.status} {mismatch.body}")
+    forgedValue: str = "forged.signature"
+    forged: InjectResponse = guarded.inject("POST", "/items", "", {"Cookie": "csrf=" + forgedValue, "X-CSRF-Token": forgedValue})
+    print(f"csrf forged: {forged.status} {forged.body}")
+    accepted: InjectResponse = guarded.inject("POST", "/items", "", {"Cookie": "theme=dark; csrf=" + csrfCookie, "X-CSRF-Token": token})
+    print(f"csrf ok: {accepted.status} {accepted.body}")
+
+    renamed: Server = Server()
+    renamed.register(csrfPlugin("csrf-secret", "xsrf", "X-XSRF-Token", ["GET", "REPORT"]))
+    renamed.get("/form", page)
+    renamed.post("/items", created)
+    renamed.route("REPORT", "/items", created)
+    renamedForm: InjectResponse = renamed.inject("REPORT", "/items")
+    renamedToken: str = renamedForm.header("X-XSRF-Token")
+    viaLower: InjectResponse = renamed.inject("POST", "/items", "", {"Cookie": "xsrf=" + renamedToken, "x-xsrf-token": renamedToken})
+    print(f"csrf custom header: {viaLower.status} {viaLower.body}")
+    strict: Server = Server()
+    csrf(strict, "csrf-secret", "csrf", "X-CSRF-Token", ["REPORT"])
+    strict.get("/form", page)
+    strict.route("REPORT", "/form", page)
+    print(f"csrf custom safe methods: GET={strict.inject('GET', '/form').status} REPORT={strict.inject('REPORT', '/form').status}")
+
+    # ── Health ──────────────────────────────────────────────────
+    health: Server = Server()
+    health.register(healthcheckPlugin("/live", "/ready"))
+    live: int = health.inject("GET", "/live").status
+    ready: int = health.inject("GET", "/ready").status
+    markNotReady(health)
+    notReady: InjectResponse = health.inject("GET", "/ready")
+    markReady(health)
+    print(f"health: live={live} ready={ready} not-ready={notReady.status} {notReady.body} ready-again={health.inject('GET', '/ready').status}")
+
+    # ── Metrics ─────────────────────────────────────────────────
+    measured: Server = Server()
+    measured.register(metricsPlugin("/prom"))
+    measured.get("/page", page)
+    measured.post("/page", posted)
+    for _ in range(3) {
+        _ = measured.inject("GET", "/page")
+    }
+    _ = measured.inject("POST", "/page")
+    _ = measured.inject("GET", "/nowhere")
+    _ = measured.inject("GET", "/prom")
+    text: str = measured.inject("GET", "/prom").body
+    counters: dict[str, str] = {}
+    buckets: list[int] = []
+    infinite: int = -1
+    count: int = -1
+    for row in text.split("\n") {
+        if row.startsWith("http_requests_total{") {
+            method: str = row.split("method=\"")[1].split("\"")[0]
+            status: str = row.split("status=\"")[1].split("\"")[0]
+            counters[method + "|" + status] = row.split(" ")[-1]
+        } elif row.startsWith("http_request_duration_seconds_bucket{le=\"+Inf\"}") {
+            infinite = int(row.split(" ")[-1])
+        } elif row.startsWith("http_request_duration_seconds_bucket") {
+            buckets.append(int(row.split(" ")[-1]))
+        } elif row.startsWith("http_request_duration_seconds_count") {
+            count = int(row.split(" ")[-1])
+        }
+    }
+    print(f"metrics: GET|200={counters['GET|200']} POST|201={counters['POST|201']} GET|404={counters['GET|404']} scrapes-uncounted={len(counters) == 3}")
+    cumulative: bool = len(buckets) == 11 and [i for i in range(1, len(buckets)) if buckets[i] < buckets[i - 1]] == [] and buckets.all(lambda b: b <= count)
+    print(f"histogram: cumulative={cumulative} inf-equals-count={infinite == count} count={count}")
+    print("ok")
+}

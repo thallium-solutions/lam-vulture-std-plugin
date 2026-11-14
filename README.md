@@ -23,7 +23,7 @@ and is the standalone continuation of Lammergeier's original
 Install the 2.0.2 registry release in a Lammergeier project:
 
 ```bash
-lamc install @lam/vulture/std-plugin@2.0.2
+lamc install @lam/vulture/std-plugin@2.0.6
 ```
 
 Or declare it in the consumer's `lamlib.toml` and install the manifest:
@@ -42,18 +42,18 @@ lamc install
 Install the tagged Git checkout directly:
 
 ```bash
-lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@2.0.2
+lamc install https://github.com/thallium-solutions/lam-vulture-std-plugin.git@2.0.6
 ```
 
 A manifest may also pin the Git source explicitly:
 
 ```toml
 [dependencies]
-"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "2.0.2" }
+"@lam/vulture/std-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-std-plugin.git", ref = "2.0.6" }
 ```
 
 The package itself resolves `@lam/vulture` from
-`https://github.com/thallium-solutions/lam-vulture.git` at `2.0.1` (tags are plain versions, without a `v` prefix).
+`https://github.com/thallium-solutions/lam-vulture.git` at `3.0.0` (tags are plain versions, without a `v` prefix).
 
 ### Local checkout
 
